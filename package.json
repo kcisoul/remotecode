@@ -1,5 +1,5 @@
 {
-  "name": "remotecode",
+  "name": "@kcisoul/remotecode",
   "version": "0.9.1",
   "description": "Telegram bot for Claude Code via long polling",
   "author": "kcisoul",

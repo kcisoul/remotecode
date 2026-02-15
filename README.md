@@ -110,7 +110,7 @@ graph TB
 ### Install
 
 ```bash
-npm install -g remotecode
+npm install -g @kcisoul/remotecode
 ```
 
 Or from source:
