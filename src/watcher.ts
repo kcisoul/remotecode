@@ -1,0 +1,207 @@
+import * as fs from "fs";
+import { TelegramConfig, sendMessage } from "./telegram";
+import { tryMdToHtml, truncateMessage } from "./format";
+import { extractMessageContent, UUID_RE, findSessionFilePath } from "./sessions";
+import { readKvFile, readEnvLines, writeEnvLines } from "./config";
+import { activeCalls } from "./context";
+import { logger, errorMessage } from "./logger";
+
+export function isAutoSyncEnabled(sessionsFile: string): boolean {
+  const val = readKvFile(sessionsFile).REMOTECODE_AUTO_SYNC;
+  return val !== "off";
+}
+
+export function setAutoSync(sessionsFile: string, enabled: boolean): void {
+  let lines = readEnvLines(sessionsFile);
+  lines = lines.filter((l) => !l.trim().startsWith("REMOTECODE_AUTO_SYNC="));
+  lines.push(`REMOTECODE_AUTO_SYNC=${enabled ? "on" : "off"}`);
+  writeEnvLines(sessionsFile, lines);
+}
+
+interface WatcherState {
+  currentSessionId: string | null;
+  currentWatcher: fs.FSWatcher | null;
+  currentFilePath: string | null;
+  lastByteOffset: number;
+  lineBuf: string;
+  pollTimer: ReturnType<typeof setInterval> | null;
+  debounceTimer: ReturnType<typeof setTimeout> | null;
+  sessionsFile: string | null;
+}
+
+const state: WatcherState = {
+  currentSessionId: null,
+  currentWatcher: null,
+  currentFilePath: null,
+  lastByteOffset: 0,
+  lineBuf: "",
+  pollTimer: null,
+  debounceTimer: null,
+  sessionsFile: null,
+};
+
+function processNewData(telegram: TelegramConfig, chatId: number): void {
+  const { currentFilePath, currentSessionId } = state;
+  if (!currentFilePath || !currentSessionId) return;
+
+  let fileSize: number;
+  try {
+    fileSize = fs.statSync(currentFilePath).size;
+  } catch {
+    return;
+  }
+
+  if (fileSize <= state.lastByteOffset) return;
+
+  let chunk: string;
+  try {
+    const buf = Buffer.alloc(fileSize - state.lastByteOffset);
+    const fd = fs.openSync(currentFilePath, "r");
+    try {
+      fs.readSync(fd, buf, 0, buf.length, state.lastByteOffset);
+    } finally {
+      fs.closeSync(fd);
+    }
+    chunk = buf.toString("utf-8");
+  } catch {
+    return;
+  }
+
+  state.lastByteOffset = fileSize;
+
+  const raw = state.lineBuf + chunk;
+  const lines = raw.split("\n");
+  // Keep the last incomplete line in the buffer
+  state.lineBuf = lines.pop() || "";
+
+  if (activeCalls.has(currentSessionId)) return;
+  if (!isAutoSyncEnabled(state.sessionsFile!)) return;
+
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    let entry: Record<string, unknown>;
+    try { entry = JSON.parse(line); } catch { continue; }
+
+    const type = entry.type as string;
+    if (type !== "assistant" && type !== "user") continue;
+    if (type === "user" && entry.isMeta) continue;
+
+    const msgObj = entry.message as Record<string, unknown> | undefined;
+    const text = extractMessageContent(msgObj?.content).trim();
+    if (!text) continue;
+
+    const cleaned = text.replace(/<thinking>[\s\S]*?<\/thinking>\s*/g, "").trim();
+    if (!cleaned) continue;
+
+    const label = type === "user" ? "[sync] You:" : "[sync] Bot:";
+    const truncated = truncateMessage(cleaned, 3200);
+    const formatted = tryMdToHtml(truncated);
+    const body = `<blockquote>${label}</blockquote>\n\n${formatted.text}`;
+    sendMessage(telegram, chatId, body, {
+      parseMode: "HTML",
+    }).catch((err) => {
+      logger.error("watcher", `sendMessage error: ${errorMessage(err)}`);
+    });
+  }
+}
+
+function startWatching(telegram: TelegramConfig, chatId: number, sessionId: string): void {
+  // Stop existing watcher
+  if (state.currentWatcher) {
+    state.currentWatcher.close();
+    state.currentWatcher = null;
+  }
+
+  const filePath = findSessionFilePath(sessionId);
+  state.currentSessionId = sessionId;
+  state.currentFilePath = filePath;
+  state.lineBuf = "";
+
+  if (!filePath) {
+    // File doesn't exist yet -- set offset to 0, will be picked up once created
+    state.lastByteOffset = 0;
+    logger.warn("watcher", `session ${sessionId.slice(0, 8)} file not found yet`);
+    return;
+  }
+
+  // Start from end of file (only new content)
+  try {
+    state.lastByteOffset = fs.statSync(filePath).size;
+  } catch {
+    state.lastByteOffset = 0;
+  }
+
+  try {
+    state.currentWatcher = fs.watch(filePath, () => {
+      if (state.debounceTimer) clearTimeout(state.debounceTimer);
+      state.debounceTimer = setTimeout(() => processNewData(telegram, chatId), 500);
+    });
+    state.currentWatcher.on("error", () => {
+      // File may have been deleted/moved; will re-attach on next poll
+      state.currentWatcher?.close();
+      state.currentWatcher = null;
+    });
+    logger.debug("watcher", `watching ${sessionId.slice(0, 8)}`);
+  } catch {
+    logger.warn("watcher", `failed to watch ${filePath}`);
+  }
+}
+
+function getChatId(sessionsFile: string): number | null {
+  const raw = readKvFile(sessionsFile).REMOTECODE_CHAT_ID;
+  if (!raw) return null;
+  const n = parseInt(raw, 10);
+  return isNaN(n) ? null : n;
+}
+
+export function startWatcher(telegram: TelegramConfig, sessionsFile: string): void {
+  logger.info("watcher", "starting");
+  state.sessionsFile = sessionsFile;
+
+  // Initial check
+  const kv = readKvFile(sessionsFile);
+  const chatId = getChatId(sessionsFile);
+  const sessionId = kv.REMOTECODE_SESSION_CLAUDE || null;
+  if (sessionId && UUID_RE.test(sessionId) && chatId) {
+    startWatching(telegram, chatId, sessionId);
+  }
+
+  // Poll for session changes every 3 seconds
+  state.pollTimer = setInterval(() => {
+    const kv = readKvFile(sessionsFile);
+    const newSessionId = kv.REMOTECODE_SESSION_CLAUDE || null;
+    const newChatId = getChatId(sessionsFile);
+
+    if (!newChatId || !newSessionId || !UUID_RE.test(newSessionId)) return;
+
+    if (newSessionId !== state.currentSessionId) {
+      logger.info("watcher", `session changed: ${state.currentSessionId?.slice(0, 8) || "none"} -> ${newSessionId.slice(0, 8)}`);
+      startWatching(telegram, newChatId, newSessionId);
+      return;
+    }
+
+    // If file didn't exist before, check again
+    if (!state.currentFilePath || !state.currentWatcher) {
+      const filePath = findSessionFilePath(newSessionId);
+      if (filePath) {
+        startWatching(telegram, newChatId, newSessionId);
+      }
+    }
+  }, 3000);
+}
+
+export function stopWatcher(): void {
+  if (state.currentWatcher) {
+    state.currentWatcher.close();
+    state.currentWatcher = null;
+  }
+  if (state.pollTimer) {
+    clearInterval(state.pollTimer);
+    state.pollTimer = null;
+  }
+  if (state.debounceTimer) {
+    clearTimeout(state.debounceTimer);
+    state.debounceTimer = null;
+  }
+  logger.info("watcher", "stopped");
+}
