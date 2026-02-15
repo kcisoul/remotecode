@@ -1,0 +1,697 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RemoteCode - Control Claude Code from Telegram</title>
+  <meta name="description" content="Control Claude Code remotely through Telegram. Same sessions, same projects, same history -- from anywhere.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0a0a0a;
+      --surface: #141414;
+      --surface-hover: #1a1a1a;
+      --border: #262626;
+      --text: #e5e5e5;
+      --text-muted: #a3a3a3;
+      --accent: #c084fc;
+      --accent-dim: #7c3aed;
+      --accent-glow: rgba(192, 132, 252, 0.15);
+      --telegram: #2AABEE;
+      --green: #4ade80;
+      --radius: 12px;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      overflow-x: hidden;
+    }
+
+    /* Nav */
+    nav {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 100;
+      padding: 1rem 2rem;
+      background: rgba(10, 10, 10, 0.8);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .nav-brand {
+      font-size: 1.25rem;
+      font-weight: 700;
+      color: var(--text);
+      text-decoration: none;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .nav-brand span {
+      color: var(--accent);
+    }
+
+    .nav-links {
+      display: flex;
+      gap: 1.5rem;
+      align-items: center;
+    }
+
+    .nav-links a {
+      color: var(--text-muted);
+      text-decoration: none;
+      font-size: 0.875rem;
+      font-weight: 500;
+      transition: color 0.2s;
+    }
+
+    .nav-links a:hover { color: var(--text); }
+
+    .nav-links .btn-sm {
+      background: var(--accent-dim);
+      color: white;
+      padding: 0.4rem 1rem;
+      border-radius: 8px;
+      font-weight: 600;
+      transition: background 0.2s;
+    }
+
+    .nav-links .btn-sm:hover {
+      background: var(--accent);
+      color: var(--bg);
+    }
+
+    /* Hero */
+    .hero {
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: 8rem 2rem 4rem;
+      position: relative;
+    }
+
+    .hero::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 800px;
+      height: 600px;
+      background: radial-gradient(ellipse, var(--accent-glow) 0%, transparent 70%);
+      pointer-events: none;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.4rem 1rem;
+      border: 1px solid var(--border);
+      border-radius: 100px;
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      margin-bottom: 2rem;
+      background: var(--surface);
+    }
+
+    .badge .dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--green);
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+
+    .hero h1 {
+      font-size: clamp(2.5rem, 6vw, 4.5rem);
+      font-weight: 700;
+      line-height: 1.1;
+      max-width: 800px;
+      margin-bottom: 1.5rem;
+    }
+
+    .hero h1 .gradient {
+      background: linear-gradient(135deg, var(--accent), var(--telegram));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .hero p {
+      font-size: 1.2rem;
+      color: var(--text-muted);
+      max-width: 560px;
+      margin-bottom: 2.5rem;
+    }
+
+    .hero-buttons {
+      display: flex;
+      gap: 1rem;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.8rem 1.75rem;
+      border-radius: 10px;
+      font-size: 1rem;
+      font-weight: 600;
+      text-decoration: none;
+      transition: all 0.2s;
+      border: none;
+      cursor: pointer;
+    }
+
+    .btn-primary {
+      background: var(--accent-dim);
+      color: white;
+    }
+
+    .btn-primary:hover {
+      background: var(--accent);
+      color: var(--bg);
+      transform: translateY(-1px);
+    }
+
+    .btn-secondary {
+      background: var(--surface);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+
+    .btn-secondary:hover {
+      background: var(--surface-hover);
+      border-color: var(--text-muted);
+      transform: translateY(-1px);
+    }
+
+    .install-cmd {
+      margin-top: 3rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1rem 1.5rem;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.9rem;
+      color: var(--text-muted);
+      display: inline-flex;
+      align-items: center;
+      gap: 1rem;
+      cursor: pointer;
+      transition: border-color 0.2s;
+      position: relative;
+    }
+
+    .install-cmd:hover { border-color: var(--accent-dim); }
+
+    .install-cmd code { color: var(--text); }
+    .install-cmd .dollar { color: var(--accent); }
+
+    .install-cmd .copy-hint {
+      font-family: 'Inter', sans-serif;
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      opacity: 0.6;
+    }
+
+    /* Diagram */
+    .diagram {
+      padding: 4rem 2rem;
+      display: flex;
+      justify-content: center;
+    }
+
+    .diagram-box {
+      display: flex;
+      align-items: center;
+      gap: 1.5rem;
+      flex-wrap: wrap;
+      justify-content: center;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.85rem;
+    }
+
+    .diagram-node {
+      padding: 0.75rem 1.25rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--surface);
+      text-align: center;
+      white-space: nowrap;
+    }
+
+    .diagram-node .label {
+      color: var(--text-muted);
+      font-size: 0.7rem;
+      display: block;
+      margin-bottom: 0.25rem;
+    }
+
+    .diagram-arrow {
+      color: var(--accent);
+      font-size: 1.25rem;
+    }
+
+    /* Sections */
+    section {
+      padding: 6rem 2rem;
+      max-width: 1100px;
+      margin: 0 auto;
+    }
+
+    .section-label {
+      font-size: 0.8rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--accent);
+      margin-bottom: 0.75rem;
+    }
+
+    .section-title {
+      font-size: clamp(1.75rem, 4vw, 2.5rem);
+      font-weight: 700;
+      margin-bottom: 1rem;
+    }
+
+    .section-desc {
+      color: var(--text-muted);
+      font-size: 1.1rem;
+      max-width: 600px;
+      margin-bottom: 3rem;
+    }
+
+    /* Features */
+    .features-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 1.25rem;
+    }
+
+    .feature-card {
+      padding: 1.75rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--surface);
+      transition: border-color 0.2s, transform 0.2s;
+    }
+
+    .feature-card:hover {
+      border-color: var(--accent-dim);
+      transform: translateY(-2px);
+    }
+
+    .feature-icon {
+      width: 40px;
+      height: 40px;
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.25rem;
+      margin-bottom: 1rem;
+      background: var(--accent-glow);
+      border: 1px solid var(--accent-dim);
+    }
+
+    .feature-card h3 {
+      font-size: 1.05rem;
+      font-weight: 600;
+      margin-bottom: 0.5rem;
+    }
+
+    .feature-card p {
+      font-size: 0.9rem;
+      color: var(--text-muted);
+      line-height: 1.5;
+    }
+
+    /* How it works */
+    .steps {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 2rem;
+      counter-reset: step;
+    }
+
+    .step {
+      position: relative;
+      padding-top: 3rem;
+    }
+
+    .step::before {
+      counter-increment: step;
+      content: counter(step);
+      position: absolute;
+      top: 0;
+      font-size: 2rem;
+      font-weight: 700;
+      color: var(--accent-dim);
+      opacity: 0.6;
+    }
+
+    .step h3 {
+      font-size: 1.05rem;
+      font-weight: 600;
+      margin-bottom: 0.5rem;
+    }
+
+    .step p {
+      font-size: 0.9rem;
+      color: var(--text-muted);
+    }
+
+    .step code {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.8rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      padding: 0.15rem 0.4rem;
+      border-radius: 4px;
+    }
+
+    /* Demo placeholder */
+    .demo-section {
+      text-align: center;
+    }
+
+    .demo-placeholder {
+      margin-top: 2rem;
+      border: 2px dashed var(--border);
+      border-radius: var(--radius);
+      padding: 4rem 2rem;
+      color: var(--text-muted);
+      font-size: 0.95rem;
+      background: var(--surface);
+    }
+
+    .demo-placeholder .icon {
+      font-size: 2.5rem;
+      margin-bottom: 1rem;
+      opacity: 0.4;
+    }
+
+    /* Commands */
+    .commands-table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    .commands-table th,
+    .commands-table td {
+      text-align: left;
+      padding: 0.75rem 1rem;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .commands-table th {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+    }
+
+    .commands-table td:first-child {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.85rem;
+      color: var(--accent);
+      white-space: nowrap;
+    }
+
+    .commands-table td:last-child {
+      color: var(--text-muted);
+      font-size: 0.9rem;
+    }
+
+    /* CTA */
+    .cta {
+      text-align: center;
+      padding: 6rem 2rem;
+      position: relative;
+    }
+
+    .cta::before {
+      content: '';
+      position: absolute;
+      bottom: 0;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 600px;
+      height: 400px;
+      background: radial-gradient(ellipse, var(--accent-glow) 0%, transparent 70%);
+      pointer-events: none;
+    }
+
+    .cta h2 {
+      font-size: clamp(1.75rem, 4vw, 2.5rem);
+      font-weight: 700;
+      margin-bottom: 1rem;
+    }
+
+    .cta p {
+      color: var(--text-muted);
+      font-size: 1.1rem;
+      margin-bottom: 2rem;
+    }
+
+    /* Footer */
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 2rem;
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 0.85rem;
+    }
+
+    footer a {
+      color: var(--text-muted);
+      text-decoration: none;
+    }
+
+    footer a:hover { color: var(--text); }
+
+    /* Responsive */
+    @media (max-width: 640px) {
+      nav { padding: 0.75rem 1rem; }
+      .nav-links { gap: 1rem; }
+      .hero { padding: 7rem 1.25rem 3rem; }
+      section { padding: 4rem 1.25rem; }
+      .diagram-box { flex-direction: column; }
+      .diagram-arrow { transform: rotate(90deg); }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Nav -->
+  <nav>
+    <a href="#" class="nav-brand">&gt;_ Remote<span>Code</span></a>
+    <div class="nav-links">
+      <a href="#features">Features</a>
+      <a href="#how-it-works">How It Works</a>
+      <a href="#commands">Commands</a>
+      <a href="https://github.com/kcisoul/remotecode" class="btn-sm">GitHub</a>
+    </div>
+  </nav>
+
+  <!-- Hero -->
+  <div class="hero">
+    <div class="badge">
+      <span class="dot"></span>
+      Open Source &middot; MIT License
+    </div>
+    <h1>
+      Control <span class="gradient">Claude Code</span><br>from anywhere
+    </h1>
+    <p>
+      Send prompts, switch sessions, share images, and dictate voice messages --
+      all through Telegram. Your local Claude Code, now in your pocket.
+    </p>
+    <div class="hero-buttons">
+      <a href="https://github.com/kcisoul/remotecode" class="btn btn-primary">
+        View on GitHub
+      </a>
+      <a href="#how-it-works" class="btn btn-secondary">
+        How It Works
+      </a>
+    </div>
+    <div class="install-cmd" onclick="navigator.clipboard.writeText('npm install -g @kcisoul/remotecode')">
+      <span><span class="dollar">$</span> <code>npm install -g @kcisoul/remotecode</code></span>
+      <span class="copy-hint">click to copy</span>
+    </div>
+  </div>
+
+  <!-- Diagram -->
+  <div class="diagram">
+    <div class="diagram-box">
+      <div class="diagram-node">
+        <span class="label">You</span>
+        Telegram
+      </div>
+      <span class="diagram-arrow">&harr;</span>
+      <div class="diagram-node">
+        <span class="label">Daemon</span>
+        RemoteCode
+      </div>
+      <span class="diagram-arrow">&harr;</span>
+      <div class="diagram-node">
+        <span class="label">CLI</span>
+        Claude Code
+      </div>
+    </div>
+  </div>
+
+  <!-- Features -->
+  <section id="features">
+    <div class="section-label">Features</div>
+    <h2 class="section-title">Everything you need, remotely</h2>
+    <p class="section-desc">
+      Works directly with your local Claude Code installation. Same sessions,
+      same project context, same history.
+    </p>
+    <div class="features-grid">
+      <div class="feature-card">
+        <div class="feature-icon">&#x1F4AC;</div>
+        <h3>Text Chat</h3>
+        <p>Send any message, get Claude Code responses with full Markdown formatting rendered as Telegram HTML.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">&#x1F5BC;</div>
+        <h3>Image Analysis</h3>
+        <p>Send photos or image documents with optional captions. Claude Code sees and analyzes them.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">&#x1F399;</div>
+        <h3>Voice Messages</h3>
+        <p>Speak your prompts. Transcribed locally via whisper-cli -- completely offline and free.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">&#x1F4C2;</div>
+        <h3>Session Management</h3>
+        <p>Multiple sessions, switch between them, browse by project. Auto-creates on first message.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">&#x1F504;</div>
+        <h3>Auto-Sync</h3>
+        <p>Watch active sessions and forward new messages in real-time. Use Claude on your host, see it on Telegram.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">&#x1F512;</div>
+        <h3>Access Control</h3>
+        <p>Restrict access by Telegram user ID or username. Unauthorized users are silently blocked.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- How it works -->
+  <section id="how-it-works">
+    <div class="section-label">Getting Started</div>
+    <h2 class="section-title">Up and running in minutes</h2>
+    <p class="section-desc">
+      Three steps to control Claude Code from your phone.
+    </p>
+    <div class="steps">
+      <div class="step">
+        <h3>Install</h3>
+        <p>Install globally via npm. Requires Node.js 18+ and Claude Code CLI already set up.</p>
+      </div>
+      <div class="step">
+        <h3>Configure</h3>
+        <p>Run <code>remotecode</code> and follow the setup wizard. Add your Telegram bot token and allowed users.</p>
+      </div>
+      <div class="step">
+        <h3>Go</h3>
+        <p>The daemon starts in the background. Open Telegram, send a message to your bot, and you're in.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Demo -->
+  <section class="demo-section" id="demo">
+    <div class="section-label">Demo</div>
+    <h2 class="section-title">See it in action</h2>
+    <p class="section-desc" style="margin-left:auto;margin-right:auto;">
+      Screenshots, videos, and examples coming soon.
+    </p>
+    <div class="demo-placeholder">
+      <div class="icon">&#x1F3AC;</div>
+      <p>Demo content will be added here.<br>Screenshots, videos, or animated GIFs of RemoteCode in use.</p>
+    </div>
+  </section>
+
+  <!-- Commands -->
+  <section id="commands">
+    <div class="section-label">Telegram Commands</div>
+    <h2 class="section-title">Built-in commands</h2>
+    <p class="section-desc">
+      Quick actions right from the Telegram chat.
+    </p>
+    <table class="commands-table">
+      <thead>
+        <tr>
+          <th>Command</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>/start</td><td>Welcome message with quick action buttons</td></tr>
+        <tr><td>/sessions</td><td>Browse and switch between recent sessions</td></tr>
+        <tr><td>/projects</td><td>Browse sessions grouped by project directory</td></tr>
+        <tr><td>/new</td><td>Start a new Claude Code session</td></tr>
+        <tr><td>/history</td><td>Show conversation history of current session</td></tr>
+        <tr><td>/sync</td><td>Toggle auto-sync notifications</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- CTA -->
+  <div class="cta">
+    <h2>Ready to go remote?</h2>
+    <p>Install RemoteCode and start coding from anywhere.</p>
+    <div class="hero-buttons">
+      <a href="https://github.com/kcisoul/remotecode" class="btn btn-primary">
+        Get Started
+      </a>
+      <a href="https://www.npmjs.com/package/@kcisoul/remotecode" class="btn btn-secondary">
+        npm Package
+      </a>
+    </div>
+  </div>
+
+  <!-- Footer -->
+  <footer>
+    <p>
+      RemoteCode &middot;
+      <a href="https://github.com/kcisoul/remotecode">GitHub</a> &middot;
+      <a href="https://www.npmjs.com/package/@kcisoul/remotecode">npm</a> &middot;
+      MIT License
+    </p>
+  </footer>
+
+</body>
+</html>
