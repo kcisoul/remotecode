@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.remotecode
+.remotecode_tmp/
+*.js.map
+*.d.ts
+!src/**/*.d.ts
