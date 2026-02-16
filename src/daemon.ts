@@ -2,7 +2,7 @@ import * as fs from "fs";
 import { spawn, execSync } from "child_process";
 import {
   loadConfig, getConfig, ensureConfigDir, pidFilePath, logFilePath, sessionsFilePath,
-  readEnvLines, writeEnvLines,
+  readEnvLines, writeEnvLines, readKvFile,
 } from "./config";
 import { logger, errorMessage } from "./logger";
 import {
@@ -177,11 +177,14 @@ async function processUpdate(update: Update, ctx: HandlerContext): Promise<void>
 
 async function pollLoop(telegramConfig: TelegramConfig, ctx: HandlerContext): Promise<void> {
   let offset = 0;
+  let conflictCount = 0;
+  const MAX_CONFLICT_RETRIES = 3;
   logger.info("poll", "Polling for updates...");
 
   while (true) {
     try {
       const updates = await getUpdates(telegramConfig, offset, 30);
+      conflictCount = 0; // reset on success
       for (const update of updates) {
         offset = update.update_id + 1;
         processUpdate(update, ctx).catch((err) => {
@@ -191,10 +194,30 @@ async function pollLoop(telegramConfig: TelegramConfig, ctx: HandlerContext): Pr
     } catch (err) {
       const message = errorMessage(err);
       if (message.includes("409")) {
-        logger.warn("poll", "Conflict: another bot instance is running or webhook is set. Clearing webhook...");
+        conflictCount++;
+        logger.warn("poll", `Conflict detected (${conflictCount}/${MAX_CONFLICT_RETRIES}): another bot instance is polling.`);
+
+        if (conflictCount >= MAX_CONFLICT_RETRIES) {
+          logger.error("poll", "Max conflict retries reached. Notifying user and shutting down.");
+          try {
+            const chatId = Number(readKvFile(ctx.sessionsFile).REMOTECODE_CHAT_ID);
+            if (chatId) {
+              await sendMessage(telegramConfig, chatId,
+                "⚠️ Another RemoteCode instance is already running with the same bot token.\n\n" +
+                "This instance failed to start due to a polling conflict.\n" +
+                "Please stop the other instance first, then run:\n" +
+                "remotecode restart",
+              );
+            }
+          } catch {
+            // best-effort: chat ID may not exist yet
+          }
+          removePid();
+          process.exit(1);
+        }
+
         try {
           await deleteWebhook(telegramConfig);
-          logger.info("poll", "Webhook cleared. Retrying...");
         } catch {
           // ignore
         }
