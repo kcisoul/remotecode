@@ -26,6 +26,8 @@
 
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
+    html { overflow-x: hidden; }
+
     body {
       font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
       background: var(--bg);
@@ -112,7 +114,7 @@
       top: 0;
       left: 50%;
       transform: translateX(-50%);
-      width: 800px;
+      width: min(800px, 100vw);
       height: 600px;
       background: radial-gradient(ellipse, var(--accent-glow) 0%, transparent 70%);
       pointer-events: none;
@@ -225,6 +227,8 @@
       cursor: pointer;
       transition: border-color 0.2s;
       position: relative;
+      max-width: calc(100vw - 2.5rem);
+      overflow: hidden;
     }
 
     .install-cmd:hover { border-color: var(--accent-dim); }
@@ -309,7 +313,7 @@
     /* Features */
     .features-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr));
       gap: 1.25rem;
     }
 
@@ -354,7 +358,7 @@
     /* How it works */
     .steps {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr));
       gap: 2rem;
       counter-reset: step;
     }
@@ -461,7 +465,7 @@
       bottom: 0;
       left: 50%;
       transform: translateX(-50%);
-      width: 600px;
+      width: min(600px, 100vw);
       height: 400px;
       background: radial-gradient(ellipse, var(--accent-glow) 0%, transparent 70%);
       pointer-events: none;
@@ -495,11 +499,18 @@
 
     footer a:hover { color: var(--text); }
 
+    /* Commands table responsive */
+    .commands-wrap {
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+
     /* Responsive */
     @media (max-width: 640px) {
       nav { padding: 0.75rem 1rem; }
-      .nav-links { gap: 1rem; }
+      .nav-links .nav-text { display: none; }
       .hero { padding: 7rem 1.25rem 3rem; }
+      .install-cmd { font-size: 0.75rem; gap: 0.5rem; padding: 0.75rem 1rem; }
       section { padding: 4rem 1.25rem; }
       .diagram-box { flex-direction: column; }
       .diagram-arrow { transform: rotate(90deg); }
@@ -512,9 +523,9 @@
   <nav>
     <a href="#" class="nav-brand">&gt;_ Remote<span>Code</span></a>
     <div class="nav-links">
-      <a href="#features">Features</a>
-      <a href="#how-it-works">How It Works</a>
-      <a href="#commands">Commands</a>
+      <a href="#features" class="nav-text">Features</a>
+      <a href="#how-it-works" class="nav-text">How It Works</a>
+      <a href="#commands" class="nav-text">Commands</a>
       <a href="https://github.com/kcisoul/remotecode" class="btn-sm">GitHub</a>
     </div>
   </nav>
@@ -651,22 +662,24 @@
     <p class="section-desc">
       Quick actions right from the Telegram chat.
     </p>
-    <table class="commands-table">
-      <thead>
-        <tr>
-          <th>Command</th>
-          <th>Description</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr><td>/start</td><td>Welcome message with quick action buttons</td></tr>
-        <tr><td>/sessions</td><td>Browse and switch between recent sessions</td></tr>
-        <tr><td>/projects</td><td>Browse sessions grouped by project directory</td></tr>
-        <tr><td>/new</td><td>Start a new Claude Code session</td></tr>
-        <tr><td>/history</td><td>Show conversation history of current session</td></tr>
-        <tr><td>/sync</td><td>Toggle auto-sync notifications</td></tr>
-      </tbody>
-    </table>
+    <div class="commands-wrap">
+      <table class="commands-table">
+        <thead>
+          <tr>
+            <th>Command</th>
+            <th>Description</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>/start</td><td>Welcome message with quick action buttons</td></tr>
+          <tr><td>/sessions</td><td>Browse and switch between recent sessions</td></tr>
+          <tr><td>/projects</td><td>Browse sessions grouped by project directory</td></tr>
+          <tr><td>/new</td><td>Start a new Claude Code session</td></tr>
+          <tr><td>/history</td><td>Show conversation history of current session</td></tr>
+          <tr><td>/sync</td><td>Toggle auto-sync notifications</td></tr>
+        </tbody>
+      </table>
+    </div>
   </section>
 
   <!-- CTA -->
