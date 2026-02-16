@@ -104,7 +104,7 @@
       align-items: center;
       justify-content: center;
       text-align: center;
-      padding: 8rem 2rem 4rem;
+      padding: 8rem 2rem 2rem;
       position: relative;
     }
 
@@ -243,44 +243,6 @@
       opacity: 0.6;
     }
 
-    /* Diagram */
-    .diagram {
-      padding: 4rem 2rem;
-      display: flex;
-      justify-content: center;
-    }
-
-    .diagram-box {
-      display: flex;
-      align-items: center;
-      gap: 1.5rem;
-      flex-wrap: wrap;
-      justify-content: center;
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 0.85rem;
-    }
-
-    .diagram-node {
-      padding: 0.75rem 1.25rem;
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      background: var(--surface);
-      text-align: center;
-      white-space: nowrap;
-    }
-
-    .diagram-node .label {
-      color: var(--text-muted);
-      font-size: 0.7rem;
-      display: block;
-      margin-bottom: 0.25rem;
-    }
-
-    .diagram-arrow {
-      color: var(--accent);
-      font-size: 1.25rem;
-    }
-
     /* Sections */
     section {
       padding: 6rem 2rem;
@@ -401,7 +363,7 @@
 
     /* Demo placeholder */
     .demo-section {
-      text-align: center;
+      text-align: left;
     }
 
     .demo-placeholder {
@@ -510,10 +472,9 @@
       nav { padding: 0.75rem 1rem; }
       .nav-links .nav-text { display: none; }
       .hero { padding: 7rem 1.25rem 3rem; }
-      .install-cmd { font-size: 0.75rem; gap: 0.5rem; padding: 0.75rem 1rem; }
+      .install-cmd { font-size: 0.75rem; }
+
       section { padding: 4rem 1.25rem; }
-      .diagram-box { flex-direction: column; }
-      .diagram-arrow { transform: rotate(90deg); }
     }
   </style>
 </head>
@@ -524,7 +485,8 @@
     <a href="#" class="nav-brand">&gt;_ Remote<span>Code</span></a>
     <div class="nav-links">
       <a href="#features" class="nav-text">Features</a>
-      <a href="#how-it-works" class="nav-text">How It Works</a>
+      <a href="#how-it-works" class="nav-text">Getting Started</a>
+      <a href="#demo" class="nav-text">Demo</a>
       <a href="#commands" class="nav-text">Commands</a>
       <a href="https://github.com/kcisoul/remotecode" class="btn-sm">GitHub</a>
     </div>
@@ -537,10 +499,10 @@
       Open Source &middot; MIT License
     </div>
     <h1>
-      Control <span class="gradient">Claude Code</span><br>from anywhere
+      Control <span class="gradient">Claude&nbsp;Code</span> from&nbsp;anywhere
     </h1>
     <p>
-      Send prompts, switch sessions, share images, and dictate voice messages --
+      Send prompts, switch sessions, share images, and dictate voice messages &mdash;
       all through Telegram. Your local Claude Code, now in your pocket.
     </p>
     <div class="hero-buttons">
@@ -554,26 +516,6 @@
     <div class="install-cmd" onclick="navigator.clipboard.writeText('npm install -g @kcisoul/remotecode')">
       <span><span class="dollar">$</span> <code>npm install -g @kcisoul/remotecode</code></span>
       <span class="copy-hint">click to copy</span>
-    </div>
-  </div>
-
-  <!-- Diagram -->
-  <div class="diagram">
-    <div class="diagram-box">
-      <div class="diagram-node">
-        <span class="label">You</span>
-        Telegram
-      </div>
-      <span class="diagram-arrow">&harr;</span>
-      <div class="diagram-node">
-        <span class="label">Daemon</span>
-        RemoteCode
-      </div>
-      <span class="diagram-arrow">&harr;</span>
-      <div class="diagram-node">
-        <span class="label">CLI</span>
-        Claude Code
-      </div>
     </div>
   </div>
 
@@ -604,7 +546,7 @@
       <div class="feature-card">
         <div class="feature-icon">&#x1F4C2;</div>
         <h3>Session Management</h3>
-        <p>Multiple sessions, switch between them, browse by project. Auto-creates on first message.</p>
+        <p>Multiple sessions, switch between them, browse by project. View conversation history for each session.</p>
       </div>
       <div class="feature-card">
         <div class="feature-icon">&#x1F504;</div>
@@ -646,7 +588,7 @@
   <section class="demo-section" id="demo">
     <div class="section-label">Demo</div>
     <h2 class="section-title">See it in action</h2>
-    <p class="section-desc" style="margin-left:auto;margin-right:auto;">
+    <p class="section-desc">
       Screenshots, videos, and examples coming soon.
     </p>
     <div class="demo-placeholder">
