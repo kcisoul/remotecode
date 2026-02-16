@@ -99,10 +99,19 @@ graph TB
     CL --> BAN
 ```
 
+## Platform Support
+
+| Platform | Status | Notes |
+|---|---|---|
+| **macOS** | Supported | Homebrew for STT dependencies |
+| **Linux** | Supported | STT currently not supported |
+| **Windows** | Not supported | |
+
 ## Quick Start
 
 ### Prerequisites
 
+- **macOS** or **Linux**
 - **Node.js** >= 18
 - **Claude Code CLI** installed and authenticated (`claude` command available)
 - **Telegram Bot Token** -- create a bot via [@BotFather](https://t.me/BotFather) on Telegram (send `/newbot`, follow the prompts, copy the token). See [Telegram's official guide](https://core.telegram.org/bots/tutorial#obtain-your-bot-token) for details
@@ -133,7 +142,7 @@ The interactive setup wizard will prompt for:
 1. **TELEGRAM_BOT_TOKEN** -- validated against Telegram API
 2. **REMOTECODE_ALLOWED_USERS** -- comma-separated user IDs or @usernames
 3. **REMOTECODE_YOLO** -- `Y` enables autonomous mode (Claude Code runs without permission prompts, required for full remote control). Set `N` if you prefer read-only / monitoring use, but note that any action requiring approval will block since there's no terminal to confirm
-4. **STT setup** -- optional offline voice transcription. Installs `whisper-cli` and `ffmpeg` via Homebrew, and downloads a local Whisper model (~466 MB). Runs entirely on your machine -- no API calls, completely free
+4. **STT setup** -- optional offline voice transcription. Installs `whisper-cli` and `ffmpeg` via your system's package manager, and downloads a local Whisper model (~466 MB). Runs entirely on your machine -- no API calls, completely free
 
 Config is saved to `~/.remotecode/config`.
 
@@ -316,10 +325,12 @@ RemoteCode uses [whisper.cpp](https://github.com/ggerganov/whisper.cpp) for loca
 remotecode setup-stt
 ```
 
-This installs (via Homebrew on macOS):
+This auto-detects your package manager and installs:
 - **whisper-cpp** -- C++ inference engine for Whisper
 - **ffmpeg** -- audio format conversion
 - **ggml-small.bin** -- Whisper small model (~466 MB, downloaded from HuggingFace)
+
+Supported package managers: Homebrew (macOS/Linux), apt (Ubuntu/Debian), dnf (Fedora/RHEL), yum (CentOS), pacman (Arch), apk (Alpine).
 
 ### How it works
 

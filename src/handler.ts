@@ -22,7 +22,7 @@ import {
 import { sessionsReplyKeyboard } from "./session-ui";
 import { handleCommand } from "./commands";
 import { HandlerContext, isUserAllowed, withSessionLock } from "./context";
-import { isSttReady } from "./stt";
+import { isSttReady, isMacOS, checkSttStatus } from "./stt";
 
 // ---------- unauthorized tracking ----------
 const warnedUsers = new Set<string>();
@@ -85,9 +85,10 @@ function transcribeAudio(audioPath: string): string {
 
   try {
     const modelPath = whisperModelPath();
-    logger.debug("whisper", `transcribing: ${wavPath}`);
+    const whisperBin = checkSttStatus().whisperCli || "whisper-cli";
+    logger.debug("whisper", `transcribing: ${wavPath} (bin: ${whisperBin})`);
     const output = execSync(
-      `whisper-cli -m "${modelPath}" -l auto --no-timestamps --no-prints -f "${wavPath}"`,
+      `"${whisperBin}" -m "${modelPath}" -l auto --no-timestamps --no-prints -f "${wavPath}"`,
       { timeout: 60000, stdio: ["pipe", "pipe", "pipe"] },
     );
     return output.toString("utf-8").trim();
@@ -182,7 +183,10 @@ async function handleVoiceMessage(msg: Message, ctx: HandlerContext): Promise<vo
 
     if (!isSttReady()) {
       logger.warn("whisper", "Speech-to-text not set up");
-      await sendMessage(ctx.telegram, chatId, "Speech-to-text is not set up.\nRun: remotecode setup-stt", { replyToMessageId: messageId });
+      const msg = isMacOS()
+        ? "Speech-to-text is not set up.\nRun: remotecode setup-stt"
+        : "Speech-to-text is currently not supported on Linux.";
+      await sendMessage(ctx.telegram, chatId, msg, { replyToMessageId: messageId });
       return;
     }
 

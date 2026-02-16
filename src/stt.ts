@@ -9,25 +9,51 @@ import { errorMessage } from "./logger";
 const MODEL_URL =
   "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin";
 
+const WHISPER_CLI_NAMES = ["whisper-cli", "whisper-cpp", "whisper"];
+
 export interface SttStatus {
   whisperCli: string | null;
   ffmpeg: string | null;
   model: string | null;
 }
 
-export function checkSttStatus(): SttStatus {
-  const which = (cmd: string): string | null => {
-    try {
-      return execSync(`which ${cmd}`, { stdio: "pipe" }).toString().trim() || null;
-    } catch {
-      return null;
-    }
-  };
+function whichCmd(cmd: string): string | null {
+  try {
+    return execSync(`which ${cmd}`, { stdio: "pipe" }).toString().trim() || null;
+  } catch {
+    return null;
+  }
+}
 
+function findWhisperCli(): string | null {
+  for (const name of WHISPER_CLI_NAMES) {
+    const found = whichCmd(name);
+    if (found) return found;
+  }
+  return null;
+}
+
+interface PkgManager {
+  name: string;
+  whisperCmd: string;
+  ffmpegCmd: string;
+}
+
+function detectPkgManager(): PkgManager | null {
+  if (whichCmd("brew")) return { name: "brew", whisperCmd: "brew install whisper-cpp", ffmpegCmd: "brew install ffmpeg" };
+  if (whichCmd("apt-get")) return { name: "apt", whisperCmd: "sudo apt-get install -y whisper.cpp", ffmpegCmd: "sudo apt-get install -y ffmpeg" };
+  if (whichCmd("dnf")) return { name: "dnf", whisperCmd: "sudo dnf install -y whisper-cpp", ffmpegCmd: "sudo dnf install -y ffmpeg" };
+  if (whichCmd("yum")) return { name: "yum", whisperCmd: "sudo yum install -y whisper-cpp", ffmpegCmd: "sudo yum install -y ffmpeg" };
+  if (whichCmd("pacman")) return { name: "pacman", whisperCmd: "sudo pacman -S --noconfirm whisper.cpp", ffmpegCmd: "sudo pacman -S --noconfirm ffmpeg" };
+  if (whichCmd("apk")) return { name: "apk", whisperCmd: "apk add whisper-cpp", ffmpegCmd: "apk add ffmpeg" };
+  return null;
+}
+
+export function checkSttStatus(): SttStatus {
   const modelPath = whisperModelPath();
   return {
-    whisperCli: which("whisper-cli"),
-    ffmpeg: which("ffmpeg"),
+    whisperCli: findWhisperCli(),
+    ffmpeg: whichCmd("ffmpeg"),
     model: fs.existsSync(modelPath) ? modelPath : null,
   };
 }
@@ -37,7 +63,12 @@ export function isSttReady(): boolean {
   return !!(s.whisperCli && s.ffmpeg && s.model);
 }
 
+export function isMacOS(): boolean {
+  return process.platform === "darwin";
+}
+
 export function getSttSummary(): string {
+  if (!isMacOS()) return "not supported (macOS only)";
   const s = checkSttStatus();
   if (s.whisperCli && s.ffmpeg && s.model) return "enabled";
   const missing: string[] = [];
@@ -59,6 +90,11 @@ export function getSttDetailLines(): string[] {
 }
 
 export async function cmdSetupStt(): Promise<void> {
+  if (!isMacOS()) {
+    console.log("STT is currently only supported on macOS.");
+    return;
+  }
+
   const status = checkSttStatus();
 
   if (status.whisperCli && status.ffmpeg && status.model) {
@@ -75,9 +111,11 @@ export async function cmdSetupStt(): Promise<void> {
   printBanner(["Setup STT (Speech-to-Text)"]);
   stopBannerResize();
 
+  const pkg = detectPkgManager();
+
   const missing: string[] = [];
-  if (!status.whisperCli) missing.push("whisper-cli  (brew install whisper-cpp)");
-  if (!status.ffmpeg) missing.push("ffmpeg       (brew install ffmpeg)");
+  if (!status.whisperCli) missing.push(`whisper-cli  (${pkg ? pkg.whisperCmd : "install whisper.cpp manually"})`);
+  if (!status.ffmpeg) missing.push(`ffmpeg       (${pkg ? pkg.ffmpegCmd : "install ffmpeg manually"})`);
   if (!status.model) missing.push("ggml-small.bin (download from HuggingFace)");
 
   console.log("Missing components:");
@@ -95,24 +133,32 @@ export async function cmdSetupStt(): Promise<void> {
 
   // Install whisper-cli
   if (!status.whisperCli) {
-    console.log("\nInstalling whisper-cpp...");
+    if (!pkg) {
+      console.error("No supported package manager found. Install whisper.cpp manually and ensure whisper-cli is in PATH.");
+      return;
+    }
+    console.log(`\nInstalling whisper-cpp via ${pkg.name}...`);
     try {
-      execSync("brew install whisper-cpp", { stdio: "inherit" });
+      execSync(pkg.whisperCmd, { stdio: "inherit" });
       console.log("whisper-cli installed.");
     } catch {
-      console.error("Failed to install whisper-cpp. Install it manually: brew install whisper-cpp");
+      console.error(`Failed to install whisper-cpp. Install it manually: ${pkg.whisperCmd}`);
       return;
     }
   }
 
   // Install ffmpeg
   if (!status.ffmpeg) {
-    console.log("\nInstalling ffmpeg...");
+    if (!pkg) {
+      console.error("No supported package manager found. Install ffmpeg manually.");
+      return;
+    }
+    console.log(`\nInstalling ffmpeg via ${pkg.name}...`);
     try {
-      execSync("brew install ffmpeg", { stdio: "inherit" });
+      execSync(pkg.ffmpegCmd, { stdio: "inherit" });
       console.log("ffmpeg installed.");
     } catch {
-      console.error("Failed to install ffmpeg. Install it manually: brew install ffmpeg");
+      console.error(`Failed to install ffmpeg. Install it manually: ${pkg.ffmpegCmd}`);
       return;
     }
   }

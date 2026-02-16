@@ -206,6 +206,10 @@ async function pollLoop(telegramConfig: TelegramConfig, ctx: HandlerContext): Pr
   }
 }
 
+export function isPrivileged(): boolean {
+  return process.getuid?.() === 0 || !!process.env.SUDO_USER;
+}
+
 // ---------- Daemon main ----------
 export async function daemonMain(): Promise<void> {
   ensureConfigDir();
@@ -215,6 +219,13 @@ export async function daemonMain(): Promise<void> {
   const cfgPath = loadConfig();
   if (cfgPath) logger.info("config", `Loaded: ${cfgPath}`);
   const config = getConfig();
+
+  if (config.yolo && isPrivileged()) {
+    logger.error("daemon", "YOLO mode cannot run with root/sudo privileges (Claude Code restriction).");
+    logger.error("daemon", "Either switch to a non-root user or set REMOTECODE_YOLO=false in config.");
+    removePid();
+    process.exit(1);
+  }
   const telegramConfig: TelegramConfig = { botToken: config.botToken };
 
   logger.info("daemon", "RemoteCode daemon starting...");

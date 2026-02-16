@@ -4,7 +4,7 @@ import { globalConfigPath, ensureConfigDir, readKvFile, writeEnvLines } from "./
 import { printBanner, stopBannerResize } from "./banner";
 import { parseTruthyEnv, errorMessage } from "./logger";
 import { getMe } from "./telegram";
-import { isSttReady, cmdSetupStt } from "./stt";
+import { isSttReady, isMacOS, cmdSetupStt } from "./stt";
 
 async function promptAndValidateToken(defaultToken?: string): Promise<string> {
   while (true) {
@@ -27,6 +27,7 @@ async function promptAndValidateToken(defaultToken?: string): Promise<string> {
 }
 
 async function promptSttSetup(): Promise<void> {
+  if (!isMacOS()) return;
   if (!isSttReady()) {
     console.log();
     const setupStt = await confirm({ message: "Setup STT (speech-to-text)?", default: true });

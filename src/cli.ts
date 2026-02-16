@@ -5,8 +5,8 @@ import { printBanner, stopBannerResize } from "./banner";
 import { formatTimeAgo } from "./session-ui";
 import { loadActiveSessionId, loadSessionCwd, findSession } from "./sessions";
 import { runSetupIfNeeded, runConfigEditor } from "./setup";
-import { getSttSummary, getSttDetailLines } from "./stt";
-import { isDaemonRunning, killOrphanDaemons, spawnDaemon } from "./daemon";
+import { getSttSummary, getSttDetailLines, isMacOS } from "./stt";
+import { isDaemonRunning, isPrivileged, killOrphanDaemons, spawnDaemon } from "./daemon";
 
 // ---------- Subcommands ----------
 export async function cmdStart(): Promise<void> {
@@ -20,7 +20,12 @@ export async function cmdStart(): Promise<void> {
   await runSetupIfNeeded();
   stopBannerResize();
   const configPath = loadConfig();
-  getConfig();
+  const config = getConfig();
+  if (config.yolo && isPrivileged()) {
+    console.error("\x1b[31mError: YOLO mode cannot run with root/sudo privileges (Claude Code restriction).\x1b[0m");
+    console.error("\x1b[31mEither switch to a non-root user or set REMOTECODE_YOLO=false in config.\x1b[0m");
+    process.exit(1);
+  }
   if (!needsSetup && configPath) printBanner(["Config: " + configPath]);
   killOrphanDaemons();
   await spawnDaemon();
@@ -97,7 +102,7 @@ export function cmdStatus(): void {
       "  --level LEVEL    Filter by DEBUG|INFO|WARN|ERROR",
       "  --tag TAG        Filter by component tag",
       "config             Edit configuration",
-      "setup-stt          Setup STT (speech-to-text)",
+      ...(isMacOS() ? ["setup-stt          Setup STT (speech-to-text)"] : []),
     ]);
     return;
   }
@@ -148,7 +153,7 @@ export function cmdStatus(): void {
     "  --level LEVEL    Filter by DEBUG|INFO|WARN|ERROR",
     "  --tag TAG        Filter by component tag",
     "config             Edit configuration",
-    "setup-stt          Setup STT (speech-to-text)",
+    ...(isMacOS() ? ["setup-stt          Setup STT (speech-to-text)"] : []),
   ]);
 }
 

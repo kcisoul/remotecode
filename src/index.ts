@@ -6,7 +6,7 @@ import { printBanner, stopBannerResize } from "./banner";
 import { errorMessage } from "./logger";
 import { runSetupIfNeeded } from "./setup";
 import { cmdSetupStt } from "./stt";
-import { daemonMain, isDaemonRunning, spawnDaemon } from "./daemon";
+import { daemonMain, isDaemonRunning, isPrivileged, spawnDaemon } from "./daemon";
 import { cmdStart, cmdStop, cmdRestart, cmdStatus, cmdLogs, cmdConfig } from "./cli";
 
 async function main(): Promise<void> {
@@ -80,7 +80,12 @@ async function main(): Promise<void> {
         await runSetupIfNeeded();
         stopBannerResize();
         loadConfig();
-        getConfig();
+        const config = getConfig();
+        if (config.yolo && isPrivileged()) {
+          console.error("\x1b[31mError: YOLO mode cannot run with root/sudo privileges (Claude Code restriction).\x1b[0m");
+          console.error("\x1b[31mEither switch to a non-root user or set REMOTECODE_YOLO=false in config.\x1b[0m");
+          process.exit(1);
+        }
         await spawnDaemon();
         cmdStatus();
         cmdLogs({ follow: true, lines: 10, level: null, tag: null });
@@ -90,7 +95,12 @@ async function main(): Promise<void> {
           cmdStatus();
         } else {
           const cfgPath = loadConfig();
-          getConfig();
+          const cfg = getConfig();
+          if (cfg.yolo && isPrivileged()) {
+            console.error("Error: YOLO mode cannot run with root/sudo privileges (Claude Code restriction).");
+            console.error("Either switch to a non-root user or set REMOTECODE_YOLO=false in config.");
+            process.exit(1);
+          }
           if (cfgPath) printBanner(["Config: " + cfgPath]);
           await spawnDaemon();
           cmdStatus();

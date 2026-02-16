@@ -41,9 +41,13 @@ export async function handleCommand(
       "/history - Show conversation history",
       "/sync - Toggle auto-sync notifications",
     ].join("\n");
+    // Send reply keyboard first, then inline keyboard buttons
     await sendMessage(ctx.telegram, chatId, welcome, {
       replyToMessageId: messageId,
       parseMode: "HTML",
+      replyMarkup: sessionsReplyKeyboard(ctx.sessionsFile),
+    });
+    await sendMessage(ctx.telegram, chatId, "Quick actions:", {
       replyMarkup: {
         inline_keyboard: [
           [
