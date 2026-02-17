@@ -18,6 +18,59 @@ You (Anywhere)  <-->  RemoteCode (Host)  <-->  Claude Code (Host)
 - **Background daemon** -- Runs as a detached process with log rotation
 - **User access control** -- Restrict access by Telegram user ID or username
 
+## Demo
+
+[![RemoteCode Demo](https://img.youtube.com/vi/JFlsf4MPQB8/maxresdefault.jpg)](https://www.youtube.com/watch?v=JFlsf4MPQB8)
+
+▶ [Watch the demo on YouTube](https://www.youtube.com/watch?v=JFlsf4MPQB8)
+
+## Platform Support
+
+| Platform | Status | Notes |
+|---|---|---|
+| **macOS** | Supported | Homebrew for STT dependencies |
+| **Linux** | Supported | STT currently not supported |
+| **Windows** | Not supported | |
+
+## Quick Start
+
+### Prerequisites
+
+- **macOS** or **Linux**
+- **Node.js** >= 18
+- **Claude Code CLI** installed and authenticated (`claude` command available)
+- **Telegram Bot Token** -- create a bot via [@BotFather](https://t.me/BotFather) on Telegram (send `/newbot`, follow the prompts, copy the token). See [Telegram's official guide](https://core.telegram.org/bots/tutorial#obtain-your-bot-token) for details
+
+### Install
+
+```bash
+npm install -g @kcisoul/remotecode
+```
+
+Or from source:
+
+```bash
+git clone https://github.com/kcisoul/remotecode.git
+cd remotecode
+npm install && npm run build
+npm link
+```
+
+### First Run
+
+```bash
+remotecode
+```
+
+The interactive setup wizard will prompt for:
+
+1. **TELEGRAM_BOT_TOKEN** -- validated against Telegram API
+2. **REMOTECODE_ALLOWED_USERS** -- comma-separated user IDs or @usernames
+3. **REMOTECODE_YOLO** -- `Y` enables autonomous mode (Claude Code runs without permission prompts, required for full remote control). Set `N` if you prefer read-only / monitoring use, but note that any action requiring approval will block since there's no terminal to confirm
+4. **STT setup** -- optional offline voice transcription. Installs `whisper-cli` and `ffmpeg` via your system's package manager, and downloads a local Whisper model (~466 MB). Runs entirely on your machine -- no API calls, completely free
+
+Config is saved to `~/.remotecode/config`.
+
 ## How It Works
 
 ```mermaid
@@ -98,53 +151,6 @@ graph TB
     SUI --> FMT
     CL --> BAN
 ```
-
-## Platform Support
-
-| Platform | Status | Notes |
-|---|---|---|
-| **macOS** | Supported | Homebrew for STT dependencies |
-| **Linux** | Supported | STT currently not supported |
-| **Windows** | Not supported | |
-
-## Quick Start
-
-### Prerequisites
-
-- **macOS** or **Linux**
-- **Node.js** >= 18
-- **Claude Code CLI** installed and authenticated (`claude` command available)
-- **Telegram Bot Token** -- create a bot via [@BotFather](https://t.me/BotFather) on Telegram (send `/newbot`, follow the prompts, copy the token). See [Telegram's official guide](https://core.telegram.org/bots/tutorial#obtain-your-bot-token) for details
-
-### Install
-
-```bash
-npm install -g @kcisoul/remotecode
-```
-
-Or from source:
-
-```bash
-git clone https://github.com/kcisoul/remotecode.git
-cd remotecode
-npm install && npm run build
-npm link
-```
-
-### First Run
-
-```bash
-remotecode
-```
-
-The interactive setup wizard will prompt for:
-
-1. **TELEGRAM_BOT_TOKEN** -- validated against Telegram API
-2. **REMOTECODE_ALLOWED_USERS** -- comma-separated user IDs or @usernames
-3. **REMOTECODE_YOLO** -- `Y` enables autonomous mode (Claude Code runs without permission prompts, required for full remote control). Set `N` if you prefer read-only / monitoring use, but note that any action requiring approval will block since there's no terminal to confirm
-4. **STT setup** -- optional offline voice transcription. Installs `whisper-cli` and `ffmpeg` via your system's package manager, and downloads a local Whisper model (~466 MB). Runs entirely on your machine -- no API calls, completely free
-
-Config is saved to `~/.remotecode/config`.
 
 ## CLI Commands
 
