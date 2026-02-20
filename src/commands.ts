@@ -126,5 +126,23 @@ export async function handleCommand(
     return true;
   }
 
+  // Claude CLI REPL slash commands — not supported in print mode
+  const cliOnlyCommands = [
+    "/clear", "/compact", "/config", "/context", "/copy", "/cost",
+    "/debug", "/desktop", "/doctor", "/exit", "/export",
+    "/init", "/mcp", "/memory", "/model", "/permissions", "/plan",
+    "/rename", "/resume", "/rewind", "/stats", "/status",
+    "/statusline", "/tasks", "/teleport", "/terminal-setup",
+    "/theme", "/todos", "/usage", "/vim",
+  ];
+  if (cliOnlyCommands.includes(command)) {
+    logger.debug("command", `chat_id=${chatId} blocked CLI-only command: ${command}`);
+    await sendMessage(ctx.telegram, chatId,
+      `<code>${command}</code> is a Claude Code CLI command and is not available in RemoteCode.`,
+      { replyToMessageId: messageId, parseMode: "HTML" },
+    );
+    return true;
+  }
+
   return false;
 }
