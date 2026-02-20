@@ -7,6 +7,7 @@ import { loadActiveSessionId, loadSessionCwd, findSession } from "./sessions";
 import { runSetupIfNeeded, runConfigEditor } from "./setup";
 import { getSttSummary, getSttDetailLines, isMacOS } from "./stt";
 import { isDaemonRunning, isPrivileged, killOrphanDaemons, spawnDaemon } from "./daemon";
+import { getCachedUpdateInfo } from "./update";
 
 // ---------- Subcommands ----------
 export async function cmdStart(): Promise<void> {
@@ -87,11 +88,17 @@ function formatUptime(ms: number): string {
 
 export function cmdStatus(): void {
   const { running, pid } = isDaemonRunning();
+  const updateInfo = getCachedUpdateInfo();
+  const updateLine = updateInfo?.updateAvailable
+    ? ["Update:  v" + updateInfo.latestVersion + " available (npm i -g @kcisoul/remotecode)"]
+    : [];
+
   if (!running || pid === null) {
     printBanner([
       "Status:  not running",
       "STT:     " + getSttSummary(),
       ...getSttDetailLines(),
+      ...updateLine,
       "--- Commands",
       "start              Start the daemon",
       "stop               Stop the daemon",
@@ -141,6 +148,7 @@ export function cmdStatus(): void {
     "Log:     " + logFilePath(),
     "STT:     " + getSttSummary(),
     ...getSttDetailLines(),
+    ...updateLine,
     "--- Session",
     ...sessionLines,
     "--- Commands",

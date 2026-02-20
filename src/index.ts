@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import * as fs from "fs";
 import * as path from "path";
+import { execSync } from "child_process";
 import { ensureConfigDir, loadConfig, getConfig, globalConfigDir } from "./config";
 import { printBanner, stopBannerResize } from "./banner";
 import { errorMessage } from "./logger";
@@ -8,6 +9,30 @@ import { runSetupIfNeeded } from "./setup";
 import { cmdSetupStt } from "./stt";
 import { daemonMain, isDaemonRunning, isPrivileged, spawnDaemon } from "./daemon";
 import { cmdStart, cmdStop, cmdRestart, cmdStatus, cmdLogs, cmdConfig } from "./cli";
+import { checkForUpdate } from "./update";
+
+async function promptUpdateIfAvailable(): Promise<void> {
+  try {
+    const info = await checkForUpdate();
+    if (!info?.updateAvailable) return;
+
+    const tty = process.stdout.isTTY;
+    const c = tty ? "\x1b[36m" : "";
+    const r = tty ? "\x1b[0m" : "";
+    console.log(`\n${c}Update available:${r} v${info.currentVersion} → v${info.latestVersion}`);
+
+    const { confirm } = await import("@inquirer/prompts");
+    const yes = await confirm({ message: "Update now?", default: true });
+    if (yes) {
+      console.log("Updating...");
+      execSync("npm install -g @kcisoul/remotecode", { stdio: "inherit" });
+      console.log("Updated. Please re-run remotecode.");
+      process.exit(0);
+    }
+  } catch {
+    // Network error or user cancelled — continue normally
+  }
+}
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
@@ -90,6 +115,9 @@ async function main(): Promise<void> {
         cmdStatus();
         cmdLogs({ follow: true, lines: 10, level: null, tag: null });
       } else {
+        // Check for updates before showing status
+        await promptUpdateIfAvailable();
+
         const { running } = isDaemonRunning();
         if (running) {
           cmdStatus();

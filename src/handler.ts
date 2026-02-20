@@ -23,6 +23,7 @@ import { sessionsReplyKeyboard } from "./session-ui";
 import { handleCommand } from "./commands";
 import { HandlerContext, isUserAllowed, withSessionLock } from "./context";
 import { isSttReady, isMacOS, checkSttStatus } from "./stt";
+import { getUpdateTip } from "./update";
 
 // ---------- unauthorized tracking ----------
 const warnedUsers = new Set<string>();
@@ -141,7 +142,7 @@ async function handleTextMessage(msg: Message, ctx: HandlerContext): Promise<voi
     await handlePrompt(text, chatId, messageId, ctx);
   } catch (err) {
     logger.error("handler", `Error in handleTextMessage: ${errorMessage(err)}`, err);
-    await sendMessage(ctx.telegram, chatId, `Error: ${errorMessage(err)}`, { replyToMessageId: messageId });
+    await sendMessage(ctx.telegram, chatId, `Error: ${errorMessage(err)}${getUpdateTip()}`, { replyToMessageId: messageId });
   }
 }
 
@@ -164,7 +165,7 @@ async function handleImageMessage(msg: Message, ctx: HandlerContext, fileId: str
     await handlePrompt(prompt, chatId, messageId, ctx, [imagePath]);
   } catch (err) {
     logger.error("handler", `Error in handleImageMessage: ${errorMessage(err)}`, err);
-    await sendMessage(ctx.telegram, chatId, `Error: ${errorMessage(err)}`, { replyToMessageId: messageId });
+    await sendMessage(ctx.telegram, chatId, `Error: ${errorMessage(err)}${getUpdateTip()}`, { replyToMessageId: messageId });
   }
 }
 
@@ -221,7 +222,7 @@ async function handleVoiceMessage(msg: Message, ctx: HandlerContext): Promise<vo
     await handlePrompt(transcription, chatId, messageId, ctx, undefined, true);
   } catch (err) {
     logger.error("handler", `Error in handleVoiceMessage: ${errorMessage(err)}`, err);
-    await sendMessage(ctx.telegram, chatId, `Error processing voice: ${errorMessage(err)}`, { replyToMessageId: messageId });
+    await sendMessage(ctx.telegram, chatId, `Error processing voice: ${errorMessage(err)}${getUpdateTip()}`, { replyToMessageId: messageId });
   }
 }
 
