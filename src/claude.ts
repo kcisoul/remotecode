@@ -20,6 +20,7 @@ export interface ClaudeOptions {
   cwd?: string;
   yolo?: boolean;
   onBusy?: () => Promise<void> | void;
+  onLongRunning?: () => Promise<void> | void;
 }
 
 function buildCmd(
@@ -35,12 +36,14 @@ function buildCmd(
   return cmd;
 }
 
-const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes (safety net)
+const LONG_RUNNING_NOTIFY_MS = 2 * 60 * 1000; // 2 minutes
 
 function runClaude(
   args: string[],
   timeoutMs?: number,
-  cwd?: string
+  cwd?: string,
+  onLongRunning?: () => Promise<void> | void
 ): Promise<string> {
   const effectiveTimeout = timeoutMs || DEFAULT_TIMEOUT_MS;
   return new Promise((resolve, reject) => {
@@ -58,6 +61,15 @@ function runClaude(
     child.stdout.on("data", (chunk: Buffer) => stdoutChunks.push(chunk));
     child.stderr.on("data", (chunk: Buffer) => stderrChunks.push(chunk));
 
+    // Notify user if task is taking long
+    let longRunningNotified = false;
+    const notifyTimer = setTimeout(() => {
+      if (!settled && !longRunningNotified && onLongRunning) {
+        longRunningNotified = true;
+        Promise.resolve(onLongRunning()).catch(() => {});
+      }
+    }, LONG_RUNNING_NOTIFY_MS);
+
     const timer = setTimeout(() => {
       child.kill("SIGTERM");
       // Force kill after 3s if still alive
@@ -70,6 +82,7 @@ function runClaude(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(notifyTimer);
       if (activeChild === child) activeChild = null;
     }
 
@@ -109,7 +122,7 @@ async function runWithFallback(
 ): Promise<string> {
   const resumeArgs = buildCmd(["--resume", sessionId], prompt, options.yolo);
   try {
-    return await runClaude(resumeArgs, options.timeoutMs, options.cwd);
+    return await runClaude(resumeArgs, options.timeoutMs, options.cwd, options.onLongRunning);
   } catch (err) {
     const message = errorMessage(err);
     logger.debug("claude", `resume failed: ${message}`);
@@ -119,7 +132,7 @@ async function runWithFallback(
     if (message.includes("No conversation found") || message.includes("empty response")) {
       logger.info("claude", `creating new session ${sessionId}`);
       const newArgs = buildCmd(["--session-id", sessionId], prompt, options.yolo);
-      return await runClaude(newArgs, options.timeoutMs, options.cwd);
+      return await runClaude(newArgs, options.timeoutMs, options.cwd, options.onLongRunning);
     }
   }
 
@@ -129,7 +142,7 @@ async function runWithFallback(
     logger.warn("claude", `Session ${sessionId.slice(0, 8)} in use, retrying (${i + 1}/5)...`);
     await sleep(2000);
     try {
-      return await runClaude(resumeArgs, options.timeoutMs, options.cwd);
+      return await runClaude(resumeArgs, options.timeoutMs, options.cwd, options.onLongRunning);
     } catch (err) {
       if (!errorMessage(err).includes("already in use")) {
         throw err;

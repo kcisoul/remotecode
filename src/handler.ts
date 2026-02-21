@@ -244,6 +244,7 @@ async function handlePrompt(
   let answer: string;
   try {
     answer = await withSessionLock(sessionId, async () => {
+      let longRunningNotified = false;
       return askClaude(formattedPrompt, sessionId, {
         imagePaths,
         cwd: sessionCwd || defaultCwd(),
@@ -252,6 +253,12 @@ async function handlePrompt(
           if (!busyNotified) {
             busyNotified = true;
             await sendMessage(ctx.telegram, chatId, "Session busy \u2014 Claude Code is active on host. Retrying...", { replyToMessageId: messageId });
+          }
+        },
+        onLongRunning: async () => {
+          if (!longRunningNotified) {
+            longRunningNotified = true;
+            await sendMessage(ctx.telegram, chatId, "\u23f3 Long-running task \u2014 still working, please wait...", { replyToMessageId: messageId });
           }
         },
       });
