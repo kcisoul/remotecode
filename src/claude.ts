@@ -85,55 +85,51 @@ function createUserMessage(content: string, sessionId: string): SDKUserMessage {
   };
 }
 
-// ---------- persistent session state ----------
+// ---------- per-session state ----------
 
-interface ActiveSession {
+interface SessionState {
   q: Query;
   channel: MessageChannel;
   sessionId: string;
   canUseToolRef: { current: CanUseToolFn | undefined };
+  turnLock: Promise<void>;
+  releaseTurn: (() => void) | null;
+  interrupted: boolean;
 }
 
-let activeSession: ActiveSession | null = null;
-
-// Turn lock: ensures only one readUntilResult is active at a time
-let turnLock: Promise<void> = Promise.resolve();
-let releaseTurn: (() => void) | null = null;
-
-// Flags for detecting interrupt / external close
-let queryInterrupted = false;
-let closedExternally = false;
+const sessions = new Map<string, SessionState>();
 
 // ---------- external control ----------
 
-export function closeActiveQuery(): void {
-  if (activeSession) {
-    logger.debug("claude", `closing query for session ${activeSession.sessionId.slice(0, 8)}`);
-    closedExternally = true;
-    activeSession.channel.close();
-    activeSession.q.close();
-    activeSession = null;
+export function closeSession(sessionId: string): void {
+  const s = sessions.get(sessionId);
+  if (s) {
+    logger.debug("claude", `closing session ${sessionId.slice(0, 8)}`);
+    s.channel.close();
+    s.q.close();
+    sessions.delete(sessionId);
   }
 }
 
-export function interruptActiveQuery(): void {
-  if (activeSession) {
-    logger.debug("claude", `interrupting query for session ${activeSession.sessionId.slice(0, 8)}`);
-    queryInterrupted = true;
-    activeSession.q.interrupt().catch(() => {});
+export function interruptSession(sessionId: string): void {
+  const s = sessions.get(sessionId);
+  if (s) {
+    logger.debug("claude", `interrupting session ${sessionId.slice(0, 8)}`);
+    s.interrupted = true;
+    s.q.interrupt().catch(() => {});
   }
 }
 
-export function wasInterrupted(): boolean {
-  const val = queryInterrupted;
-  queryInterrupted = false;
+export function wasSessionInterrupted(sessionId: string): boolean {
+  const s = sessions.get(sessionId);
+  if (!s) return false;
+  const val = s.interrupted;
+  s.interrupted = false;
   return val;
 }
 
-export function wasClosedExternally(): boolean {
-  const val = closedExternally;
-  closedExternally = false;
-  return val;
+export function hasSession(sessionId: string): boolean {
+  return sessions.has(sessionId);
 }
 
 // ---------- main query function ----------
@@ -142,77 +138,95 @@ export async function* querySession(
   prompt: string,
   options: QueryOptions,
 ): AsyncGenerator<SDKMessage> {
-  // Wait for any previous turn to complete
-  await turnLock;
-  turnLock = new Promise((r) => { releaseTurn = r; });
+  const sessionId = options.sessionId!;
+  let session = sessions.get(sessionId);
 
-  try {
-    const sameSession = activeSession && activeSession.sessionId === options.sessionId;
+  if (session) {
+    // Wait for session's turn lock
+    await session.turnLock;
+    session.turnLock = new Promise((r) => { session!.releaseTurn = r; });
 
-    if (sameSession) {
-      logger.debug("claude", `reusing query for session ${options.sessionId?.slice(0, 8)}`);
+    logger.debug("claude", `reusing session ${sessionId.slice(0, 8)}`);
 
-      // Update canUseTool reference for new message's context
-      activeSession!.canUseToolRef.current = options.canUseTool;
+    // Update canUseTool reference for new message's context
+    session.canUseToolRef.current = options.canUseTool;
 
-      // Update model if needed
-      if (options.model) {
-        try { await activeSession!.q.setModel(options.model); } catch { /* ignore */ }
-      }
-
-      // Feed new message via channel
-      activeSession!.channel.push(createUserMessage(prompt, options.sessionId!));
-
-      yield* readUntilResult();
-    } else {
-      // Close old query if switching sessions
-      closeActiveQuery();
-
-      const sessionId = options.sessionId!;
-      const hasFile = !!findSessionFilePath(sessionId);
-
-      logger.debug(
-        "claude",
-        `new query: session=${sessionId.slice(0, 8)} resume=${hasFile} model=${options.model || "default"}`,
-      );
-
-      // Mutable canUseTool reference so handler can update per-message
-      const canUseToolRef: { current: CanUseToolFn | undefined } = {
-        current: options.canUseTool,
-      };
-      const wrappedCanUseTool: CanUseToolFn = (toolName, input, opts) => {
-        if (!canUseToolRef.current) {
-          return Promise.resolve({ behavior: "deny" as const, message: "No handler" });
-        }
-        return canUseToolRef.current(toolName, input, opts);
-      };
-
-      // Create message channel (streaming input mode) and push first message
-      const channel = new MessageChannel();
-      channel.push(createUserMessage(prompt, sessionId));
-
-      const q = query({
-        prompt: channel,
-        options: {
-          ...(hasFile
-            ? { resume: sessionId }
-            : { sessionId }),
-          cwd: options.cwd,
-          model: options.model,
-          permissionMode: options.yolo ? "bypassPermissions" : undefined,
-          allowDangerouslySkipPermissions: options.yolo || undefined,
-          canUseTool: wrappedCanUseTool,
-        },
-      });
-
-      activeSession = { q, channel, sessionId, canUseToolRef };
-
-      yield* readUntilResult();
+    // Update model if needed
+    if (options.model) {
+      try { await session.q.setModel(options.model); } catch { /* ignore */ }
     }
-  } finally {
-    if (releaseTurn) {
-      releaseTurn();
-      releaseTurn = null;
+
+    // Feed new message via channel
+    session.channel.push(createUserMessage(prompt, sessionId));
+
+    try {
+      yield* readUntilResult(sessionId);
+    } finally {
+      if (session.releaseTurn) {
+        session.releaseTurn();
+        session.releaseTurn = null;
+      }
+    }
+  } else {
+    // Create new session
+    const hasFile = !!findSessionFilePath(sessionId);
+
+    logger.debug(
+      "claude",
+      `new session: ${sessionId.slice(0, 8)} resume=${hasFile} model=${options.model || "default"}`,
+    );
+
+    // Mutable canUseTool reference so handler can update per-message
+    const canUseToolRef: { current: CanUseToolFn | undefined } = {
+      current: options.canUseTool,
+    };
+    const wrappedCanUseTool: CanUseToolFn = (toolName, input, opts) => {
+      if (!canUseToolRef.current) {
+        return Promise.resolve({ behavior: "deny" as const, message: "No handler" });
+      }
+      return canUseToolRef.current(toolName, input, opts);
+    };
+
+    // Create message channel (streaming input mode) and push first message
+    const channel = new MessageChannel();
+    channel.push(createUserMessage(prompt, sessionId));
+
+    const q = query({
+      prompt: channel,
+      options: {
+        ...(hasFile
+          ? { resume: sessionId }
+          : { sessionId }),
+        cwd: options.cwd,
+        model: options.model,
+        permissionMode: options.yolo ? "bypassPermissions" : undefined,
+        allowDangerouslySkipPermissions: options.yolo || undefined,
+        canUseTool: wrappedCanUseTool,
+      },
+    });
+
+    const newSession: SessionState = {
+      q,
+      channel,
+      sessionId,
+      canUseToolRef,
+      turnLock: Promise.resolve(),
+      releaseTurn: null,
+      interrupted: false,
+    };
+
+    sessions.set(sessionId, newSession);
+
+    // Acquire turn lock for this turn
+    newSession.turnLock = new Promise((r) => { newSession.releaseTurn = r; });
+
+    try {
+      yield* readUntilResult(sessionId);
+    } finally {
+      if (newSession.releaseTurn) {
+        newSession.releaseTurn();
+        newSession.releaseTurn = null;
+      }
     }
   }
 }
@@ -220,28 +234,25 @@ export async function* querySession(
 // Read messages from the persistent query until a result message is received.
 // Uses .next() instead of for-await to avoid calling .return() on the generator,
 // which would close the persistent query.
-async function* readUntilResult(): AsyncGenerator<SDKMessage> {
-  if (!activeSession) return;
-  const q = activeSession.q;
+async function* readUntilResult(sessionId: string): AsyncGenerator<SDKMessage> {
+  const s = sessions.get(sessionId);
+  if (!s) return;
 
   while (true) {
     let result: IteratorResult<SDKMessage, void>;
     try {
-      result = await q.next();
+      result = await s.q.next();
     } catch (err) {
-      if (closedExternally) {
-        // Session was switched externally - exit gracefully
-        closedExternally = false;
-        return;
-      }
-      logger.error("claude", `query read error: ${err}`);
-      activeSession = null;
+      // Session may have been closed externally
+      if (!sessions.has(sessionId)) return;
+      logger.error("claude", `session ${sessionId.slice(0, 8)} read error: ${err}`);
+      sessions.delete(sessionId);
       throw err;
     }
 
     if (result.done) {
-      logger.debug("claude", "query iterator ended unexpectedly");
-      activeSession = null;
+      logger.debug("claude", `session ${sessionId.slice(0, 8)} iterator ended`);
+      sessions.delete(sessionId);
       return;
     }
 

@@ -16,7 +16,9 @@ import {
   sessionsReplyKeyboard,
 } from "./session-ui";
 import { HandlerContext } from "./context";
-import { buildProjectListMarkup } from "./callbacks";
+import { buildProjectListMarkup, denyAllPending } from "./callbacks";
+import { interruptSession } from "./claude";
+import { clearQueue, isSessionBusy } from "./handler";
 
 export async function handleCommand(
   text: string,
@@ -42,6 +44,7 @@ export async function handleCommand(
       "/new - Start a new session",
       "/history - Show conversation history",
       "/model - Switch Claude model",
+      "/cancel - Cancel the current task",
       "/sync - Toggle auto-sync notifications",
     ].join("\n");
     // Send reply keyboard first, then inline keyboard buttons
@@ -137,6 +140,20 @@ export async function handleCommand(
         replyToMessageId: messageId,
         replyMarkup: { inline_keyboard: buttons },
       });
+    }
+    return true;
+  }
+
+  if (command === "/cancel") {
+    logger.debug("command", `chat_id=${chatId} command=/cancel`);
+    const activeId = loadActiveSessionId(ctx.sessionsFile);
+    if (activeId && isSessionBusy(activeId)) {
+      denyAllPending();
+      clearQueue(activeId);
+      interruptSession(activeId);
+      await sendMessage(ctx.telegram, chatId, "Task cancelled.", { replyToMessageId: messageId });
+    } else {
+      await sendMessage(ctx.telegram, chatId, "No active task to cancel.", { replyToMessageId: messageId });
     }
     return true;
   }

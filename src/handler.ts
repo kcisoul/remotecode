@@ -12,7 +12,7 @@ import {
   sendChatAction,
   downloadFile,
 } from "./telegram";
-import { querySession, interruptActiveQuery, wasInterrupted, wasClosedExternally, type SDKMessage, type CanUseToolFn } from "./claude";
+import { querySession, closeSession, interruptSession, wasSessionInterrupted, type SDKMessage, type CanUseToolFn } from "./claude";
 import { mdToTelegramHtml, escapeHtml, tryMdToHtml, truncateMessage } from "./format";
 import { logger, errorMessage } from "./logger";
 import { defaultCwd, whisperModelPath } from "./config";
@@ -24,7 +24,7 @@ import {
 import { sessionsReplyKeyboard } from "./session-ui";
 import { handleCommand } from "./commands";
 import { HandlerContext, isUserAllowed, activeQueries } from "./context";
-import { registerPendingAsk, registerPendingPerm, denyAllPending } from "./callbacks";
+import { registerPendingAsk, registerPendingPerm, denyAllPending, hasPendingPerms } from "./callbacks";
 import { isSttReady, isMacOS, checkSttStatus } from "./stt";
 import { skipToEnd } from "./watcher";
 
@@ -118,15 +118,40 @@ const SILENT_TOOLS = new Set([
   "TodoRead", "AskUserQuestion",
 ]);
 
-// ---------- session-level auto-allow ----------
-let sessionAutoAllow = false;
+// ---------- per-session auto-allow ----------
+const sessionAutoAllowMap = new Map<string, boolean>();
 
-export function resetSessionAutoAllow(): void {
-  sessionAutoAllow = false;
+export function resetSessionAutoAllow(sessionId: string): void {
+  sessionAutoAllowMap.delete(sessionId);
 }
 
-export function setSessionAutoAllow(): void {
-  sessionAutoAllow = true;
+export function setSessionAutoAllow(sessionId: string): void {
+  sessionAutoAllowMap.set(sessionId, true);
+}
+
+// ---------- message queue ----------
+interface QueuedMessage {
+  prompt: string;
+  chatId: number;
+  messageId: number;
+  ctx: HandlerContext;
+  voiceMode?: boolean;
+}
+
+const messageQueue = new Map<string, QueuedMessage[]>();
+const processingTurns = new Set<string>();
+
+function enqueue(sessionId: string, msg: QueuedMessage): void {
+  if (!messageQueue.has(sessionId)) messageQueue.set(sessionId, []);
+  messageQueue.get(sessionId)!.push(msg);
+}
+
+export function clearQueue(sessionId: string): void {
+  messageQueue.delete(sessionId);
+}
+
+export function isSessionBusy(sessionId: string): boolean {
+  return processingTurns.has(sessionId);
 }
 
 // ---------- tool description formatting ----------
@@ -153,7 +178,7 @@ function formatToolDescription(toolName: string, input: Record<string, unknown>)
 }
 
 // ---------- canUseTool callback builder ----------
-function buildCanUseTool(ctx: HandlerContext, chatId: number, messageId: number): CanUseToolFn {
+function buildCanUseTool(ctx: HandlerContext, chatId: number, messageId: number, sessionId: string): CanUseToolFn {
   return async (toolName, input, { decisionReason }) => {
     // 1) AskUserQuestion → inline keyboard with options
     if (toolName === "AskUserQuestion") {
@@ -178,7 +203,7 @@ function buildCanUseTool(ctx: HandlerContext, chatId: number, messageId: number)
     }
 
     // 2) Yolo mode or session auto-allow → auto-allow everything
-    if (ctx.yolo || sessionAutoAllow) {
+    if (ctx.yolo || sessionAutoAllowMap.get(sessionId)) {
       return { behavior: "allow" as const, updatedInput: input };
     }
 
@@ -191,7 +216,7 @@ function buildCanUseTool(ctx: HandlerContext, chatId: number, messageId: number)
         { text: "Deny", callback_data: `perm:${permId}:deny` },
       ],
       [
-        { text: "Allow all", callback_data: `perm:${permId}:allowall` },
+        { text: "Allow all", callback_data: `perm:${permId}:allowall:${sessionId}` },
       ],
     ];
     await sendMessage(ctx.telegram, chatId, reason, {
@@ -236,6 +261,7 @@ async function handleTextMessage(msg: Message, ctx: HandlerContext): Promise<voi
 
   try {
     logger.debug("text", `chat_id=${chatId} message_id=${messageId} text=${text}`);
+    // Commands always handled immediately (regardless of busy state)
     if (await handleCommand(text, chatId, messageId, ctx)) return;
     await handlePrompt(text, chatId, messageId, ctx);
   } catch (err) {
@@ -342,13 +368,33 @@ async function handlePrompt(
     });
     return;
   }
-  const model = loadModel(ctx.sessionsFile);
   const formattedPrompt = formatPrompt(prompt, imagePaths);
 
-  // Interrupt any active turn & deny pending permissions
-  denyAllPending();
-  interruptActiveQuery();
+  // If this session is busy, queue the message
+  if (processingTurns.has(sessionId)) {
+    enqueue(sessionId, { prompt: formattedPrompt, chatId, messageId, ctx, voiceMode });
+    if (hasPendingPerms()) {
+      // Permission dialog open → deny to unblock, queue drains immediately
+      denyAllPending();
+    }
+    return;
+  }
 
+  await executePrompt(sessionId, formattedPrompt, chatId, messageId, ctx, voiceMode);
+}
+
+async function executePrompt(
+  sessionId: string,
+  prompt: string,
+  chatId: number,
+  messageId: number,
+  ctx: HandlerContext,
+  voiceMode?: boolean,
+): Promise<void> {
+  const cwd = loadSessionCwd(ctx.sessionsFile) || defaultCwd();
+  const model = loadModel(ctx.sessionsFile);
+
+  processingTurns.add(sessionId);
   activeQueries.add(sessionId);
   const stopTyping = startTyping(ctx.telegram, chatId);
 
@@ -356,14 +402,14 @@ async function handlePrompt(
   let gotResult = false;
 
   try {
-    for await (const msg of querySession(formattedPrompt, {
+    for await (const msg of querySession(prompt, {
       sessionId,
       cwd,
       yolo: ctx.yolo,
       model,
-      canUseTool: buildCanUseTool(ctx, chatId, messageId),
+      canUseTool: buildCanUseTool(ctx, chatId, messageId, sessionId),
     })) {
-      // Log init (session ID already set via getOrCreateSessionId)
+      // Log init
       if (msg.type === "system" && msg.subtype === "init") {
         const initMsg = msg as SDKMessage & { session_id: string };
         logger.debug("handler", `session init: ${initMsg.session_id?.slice(0, 8)}`);
@@ -408,17 +454,15 @@ async function handlePrompt(
       if (msg.type === "result") {
         gotResult = true;
         const resultMsg = msg as SDKMessage & { is_error: boolean; errors?: string[]; total_cost_usd?: number; num_turns?: number };
-        if (resultMsg.is_error && resultMsg.errors && !wasInterrupted()) {
+        if (resultMsg.is_error && resultMsg.errors && !wasSessionInterrupted(sessionId)) {
           const errText = resultMsg.errors.join("\n");
           await sendMessage(ctx.telegram, chatId, `Error: ${errText}`, { replyToMessageId: messageId });
         }
       }
     }
 
-    // If query was closed externally (session switch), don't send text
-    if (!gotResult || wasClosedExternally()) {
-      return;
-    }
+    // If query was closed externally (session switch / cancel), don't send text
+    if (!gotResult) return;
 
     // Send collected text response
     const fullText = textParts.join("\n").trim().replace(/<thinking>[\s\S]*?<\/thinking>\s*/g, "").trim();
@@ -445,5 +489,29 @@ async function handlePrompt(
     stopTyping();
     skipToEnd();
     activeQueries.delete(sessionId);
+
+    // Auto-close non-active session processes when their task finishes
+    const currentActiveId = getOrCreateSessionId(ctx.sessionsFile);
+    const queue = messageQueue.get(sessionId);
+    const hasQueuedMessages = queue && queue.length > 0;
+
+    if (sessionId !== currentActiveId && !hasQueuedMessages) {
+      closeSession(sessionId);
+      processingTurns.delete(sessionId);
+      return;
+    }
+
+    // Drain message queue
+    if (hasQueuedMessages) {
+      const next = queue!.shift()!;
+      if (queue!.length === 0) messageQueue.delete(sessionId);
+      // Keep processingTurns set — next executePrompt will manage it
+      executePrompt(sessionId, next.prompt, next.chatId, next.messageId, next.ctx, next.voiceMode).catch(err => {
+        logger.error("handler", `Queue drain error: ${errorMessage(err)}`);
+        processingTurns.delete(sessionId);
+      });
+    } else {
+      processingTurns.delete(sessionId);
+    }
   }
 }
