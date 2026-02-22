@@ -18,86 +18,11 @@ You (Anywhere)  <-->  RemoteCode (Host)  <-->  Claude Code (Host)
 - **Background daemon** -- Runs as a detached process with log rotation
 - **User access control** -- Restrict access by Telegram user ID or username
 
-## How It Works
+## Demo
 
-```mermaid
-sequenceDiagram
-    participant U as You (Telegram)
-    participant T as Telegram API
-    participant D as RemoteCode Daemon
-    participant C as Claude Code CLI
+[![RemoteCode Demo](https://img.youtube.com/vi/JFlsf4MPQB8/maxresdefault.jpg)](https://www.youtube.com/watch?v=JFlsf4MPQB8)
 
-    U->>T: Send message
-    T->>D: Long polling (getUpdates)
-    D->>D: Auth check & route
-
-    alt Text message
-        D->>C: claude --resume <session> --print "prompt"
-    else Image
-        D->>T: Download file
-        D->>C: claude --resume <session> --print "prompt + image path"
-    else Voice
-        D->>T: Download audio
-        D->>D: ffmpeg + whisper-cli transcription
-        D->>C: claude --resume <session> --print "transcription"
-    end
-
-    C-->>D: stdout response
-    D->>D: Markdown → Telegram HTML
-    D->>T: sendMessage (HTML)
-    T-->>U: Formatted response
-```
-
-## Architecture
-
-```mermaid
-graph TB
-    subgraph CLI["CLI (Terminal)"]
-        IDX[index.ts<br/>arg parser]
-        CL[cli.ts<br/>subcommands]
-    end
-
-    subgraph Daemon["Daemon Process"]
-        DAE[daemon.ts<br/>poll loop + PID]
-        HND[handler.ts<br/>message router]
-        CMD[commands.ts<br/>slash commands]
-        CB[callbacks.ts<br/>inline buttons]
-        WAT[watcher.ts<br/>auto-sync]
-    end
-
-    subgraph Core["Core"]
-        TEL[telegram.ts<br/>API client]
-        CLA[claude.ts<br/>CLI spawner]
-        SES[sessions.ts<br/>discovery + state]
-        SUI[session-ui.ts<br/>UI formatting]
-    end
-
-    subgraph Shared["Shared"]
-        CFG[config.ts<br/>paths + KV I/O]
-        LOG[logger.ts<br/>logging]
-        BAN[banner.ts<br/>terminal UI]
-        CTX[context.ts<br/>auth + locks]
-        FMT[format.ts<br/>MD → HTML]
-    end
-
-    IDX --> DAE
-    IDX --> CL
-    CL --> DAE
-    DAE --> HND
-    DAE --> CB
-    HND --> CMD
-    HND --> CLA
-    HND --> CTX
-    CB --> SES
-    CB --> SUI
-    CMD --> SUI
-    WAT --> SES
-    WAT --> CTX
-    CLA --> LOG
-    TEL --> LOG
-    SUI --> FMT
-    CL --> BAN
-```
+▶ [Watch the demo on YouTube](https://www.youtube.com/watch?v=JFlsf4MPQB8)
 
 ## Platform Support
 
@@ -105,7 +30,7 @@ graph TB
 |---|---|---|
 | **macOS** | Supported | Homebrew for STT dependencies |
 | **Linux** | Supported | STT currently not supported |
-| **Windows** | Not supported | |
+| **Windows** | Not tested | |
 
 ## Quick Start
 
@@ -145,6 +70,36 @@ The interactive setup wizard will prompt for:
 4. **STT setup** -- optional offline voice transcription. Installs `whisper-cli` and `ffmpeg` via your system's package manager, and downloads a local Whisper model (~466 MB). Runs entirely on your machine -- no API calls, completely free
 
 Config is saved to `~/.remotecode/config`.
+
+## How It Works
+
+```mermaid
+sequenceDiagram
+    participant U as 📱 Telegram
+    participant T as ☁️ Telegram API
+    participant D as ⚙️ RemoteCode
+    participant C as 🤖 Claude Code
+
+    U->>T: Send message
+    T->>D: Long polling (getUpdates)
+    D->>D: Auth check & route
+
+    alt Text message
+        D->>C: claude --resume session --print "prompt"
+    else Image
+        D->>T: Download file
+        D->>C: claude --resume session --print "prompt + image"
+    else Voice
+        D->>T: Download audio
+        D->>D: ffmpeg → whisper-cli transcription
+        D->>C: claude --resume session --print "transcription"
+    end
+
+    C-->>D: stdout response
+    D->>D: Markdown → Telegram HTML
+    D->>T: sendMessage (HTML)
+    T-->>U: Formatted response
+```
 
 ## CLI Commands
 
@@ -214,17 +169,6 @@ Send a voice message or audio file. The bot:
 
 ## Session Management
 
-```mermaid
-stateDiagram-v2
-    [*] --> NoSession: First message
-    NoSession --> NewSession: auto-create UUID
-    NewSession --> Active: claude --session-id
-    Active --> Active: claude --resume
-    Active --> Switched: /sessions or inline button
-    Switched --> Active: select different session
-    Active --> NewSession: /new
-```
-
 RemoteCode discovers sessions from `~/.claude/projects/*/` by scanning `.jsonl` files. Each session maps to a Claude Code conversation.
 
 - **Active session** is stored in `~/.remotecode/local`
@@ -258,62 +202,6 @@ REMOTECODE_YOLO=true
 | `REMOTECODE_ALLOWED_USERS` | Yes | Comma/space-separated user IDs or @usernames |
 | `REMOTECODE_YOLO` | No | `true` for full remote control (skips Claude Code permission prompts). Set `false` for read-only / monitoring use |
 | `REMOTECODE_VERBOSE` | No | `true` to enable DEBUG-level logging |
-
-## File Structure
-
-```
-~/.remotecode/
-  config              # Global configuration (KV file)
-  local               # Active session state (session ID, CWD, chat ID)
-  remotecode.pid      # Daemon process ID
-  remotecode.log      # Log file (5MB rotation, keeps .old)
-  remotecode.log.old  # Previous rotated log
-  whisper/
-    ggml-small.bin    # Whisper model (if STT enabled)
-  RemoteCodeSessions/ # Default CWD for new sessions
-```
-
-## Message Flow
-
-```mermaid
-flowchart TD
-    A[Telegram Update] --> B{Message type?}
-    B -->|callback_query| C[callbacks.ts]
-    B -->|message| D{Content type?}
-
-    D -->|text starts with /| E[commands.ts]
-    D -->|text| F[handlePrompt]
-    D -->|photo / image doc| G[Download & save image]
-    D -->|voice / audio| H{STT ready?}
-
-    H -->|No| I[Send setup instructions]
-    H -->|Yes| J[Download → ffmpeg → whisper-cli]
-    J --> K{Blank audio?}
-    K -->|Yes| L[No speech detected]
-    K -->|No| F
-
-    G --> F
-
-    F --> M[withSessionLock]
-    M --> N[askClaude via CLI]
-    N --> O{Session exists?}
-    O -->|Yes| P[--resume session]
-    O -->|No| Q[--session-id new]
-    O -->|Busy| R[Retry up to 5x]
-
-    P --> S[Format response]
-    Q --> S
-    R --> S
-    S --> T[sendMessage HTML]
-
-    C --> U{Action}
-    U -->|sess:list| V[Show session grid]
-    U -->|sess:ID| W[Switch session]
-    U -->|sess:new| X[Create new session]
-    U -->|proj:list| Y[Show project list]
-    U -->|proj:DIR| Z[Show project sessions]
-    U -->|sessdel:ID| AA[Delete session]
-```
 
 ## Speech-to-Text (STT)
 
