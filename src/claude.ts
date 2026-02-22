@@ -10,6 +10,11 @@ if (!process.env.PATH?.includes(nodeDir)) {
   process.env.PATH = `${nodeDir}:${process.env.PATH || ""}`;
 }
 
+// Remove CLAUDECODE env var to allow SDK to spawn Claude Code subprocess.
+// When RemoteCode itself runs inside a Claude Code session (e.g. via `claude` CLI),
+// this variable is inherited and blocks nested sessions.
+delete process.env.CLAUDECODE;
+
 export type CanUseToolFn = (
   toolName: string,
   input: Record<string, unknown>,
@@ -176,6 +181,9 @@ function initNewSession(
       permissionMode: options.yolo ? "bypassPermissions" : undefined,
       allowDangerouslySkipPermissions: options.yolo || undefined,
       canUseTool: wrappedCanUseTool,
+      stderr: (data: string) => {
+        logger.debug("claude", `[stderr:${sessionId.slice(0, 8)}] ${data.trimEnd()}`);
+      },
     },
   });
 

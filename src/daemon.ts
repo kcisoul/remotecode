@@ -319,10 +319,13 @@ export async function spawnDaemon(): Promise<void> {
   const logPath = logFilePath();
   const logFd = fs.openSync(logPath, "a");
 
+  const env = { ...process.env };
+  delete env.CLAUDECODE; // Allow SDK to spawn Claude Code subprocesses
+
   const child = spawn(process.execPath, [...process.execArgv, process.argv[1], "--daemon"], {
     detached: true,
     stdio: ["ignore", logFd, logFd],
-    env: { ...process.env },
+    env,
   });
   child.unref();
   fs.closeSync(logFd);
