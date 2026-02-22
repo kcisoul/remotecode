@@ -8,7 +8,7 @@ import {
 import { logger, errorMessage, silentCatch } from "./logger";
 import { escapeHtml } from "./format";
 import { HandlerContext, isUserAllowed } from "./context";
-import { setSessionAutoAllow, resetSessionAutoAllow, isSessionBusy, suppressSessionMessages, unsuppressSessionMessages } from "./handler";
+import { setSessionAutoAllow, setSessionToolAllow, resetSessionAutoAllow, isSessionBusy, suppressSessionMessages, unsuppressSessionMessages } from "./handler";
 import {
   loadActiveSessionId,
   saveActiveSessionId,
@@ -37,9 +37,15 @@ const pendingAsk = new Map<string, {
   timer: ReturnType<typeof setTimeout>;
 }>();
 
+export interface PermMeta {
+  sessionId: string;
+  toolName: string;
+}
+
 const pendingPerm = new Map<string, {
   resolve: (decision: "allow" | "deny" | "allowall") => void;
   timer: ReturnType<typeof setTimeout>;
+  meta: PermMeta;
 }>();
 
 const PENDING_TIMEOUT_MS = 300_000; // 5 minutes
@@ -54,13 +60,13 @@ export function registerPendingAsk(id: string): Promise<Record<string, string>> 
   });
 }
 
-export function registerPendingPerm(id: string): Promise<"allow" | "deny" | "allowall"> {
+export function registerPendingPerm(id: string, meta: PermMeta): Promise<"allow" | "deny" | "allowall"> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       pendingPerm.delete(id);
       reject(new Error("Timeout waiting for permission response"));
     }, PENDING_TIMEOUT_MS);
-    pendingPerm.set(id, { resolve, timer });
+    pendingPerm.set(id, { resolve, timer, meta });
   });
 }
 
@@ -199,22 +205,37 @@ async function handlePermCallback(
   messageId: number,
   ctx: HandlerContext
 ): Promise<void> {
-  // Format: "perm:<id>:allow" or "perm:<id>:deny" or "perm:<id>:allowall:<sessionId>"
+  // Formats: perm:<id>:allow | perm:<id>:deny | perm:<id>:tool | perm:<id>:yolo
   const parts = data.split(":");
   if (parts.length < 3) { logger.warn("callback", `malformed perm data: ${data}`); return; }
   const id = parts[1];
-  const decision = parts[2] as "allow" | "deny" | "allowall";
+  const decision = parts[2];
   const pending = pendingPerm.get(id);
+  let label = decision;
+
   if (pending) {
     clearTimeout(pending.timer);
     pendingPerm.delete(id);
-    if (decision === "allowall" && parts[3]) {
-      setSessionAutoAllow(parts[3]);
+    const { sessionId, toolName } = pending.meta;
+
+    if (decision === "tool") {
+      setSessionToolAllow(sessionId, toolName);
+      label = `Allowed ${toolName} for session`;
+      pending.resolve("allow");
+    } else if (decision === "yolo") {
+      setSessionAutoAllow(sessionId);
+      label = "Yolo for session";
+      pending.resolve("allow");
+    } else if (decision === "allow") {
+      label = "Allowed";
+      pending.resolve("allow");
+    } else {
+      label = "Denied";
+      pending.resolve("deny");
     }
-    pending.resolve(decision);
   }
-  const labels: Record<string, string> = { allow: "Allowed", deny: "Denied", allowall: "Allowed (all)" };
-  silentCatch("callback", "editPermResponse", editMessageText(ctx.telegram, chatId, messageId, labels[decision] || decision));
+
+  silentCatch("callback", "editPermResponse", editMessageText(ctx.telegram, chatId, messageId, label));
 }
 
 // ---------- model callback ----------

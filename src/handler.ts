@@ -24,7 +24,7 @@ import {
 import { sessionsReplyKeyboard } from "./session-ui";
 import { handleCommand } from "./commands";
 import { HandlerContext, isUserAllowed, activeQueries } from "./context";
-import { registerPendingAsk, registerPendingPerm, denyAllPending, hasPendingPerms } from "./callbacks";
+import { registerPendingAsk, registerPendingPerm, denyAllPending, hasPendingPerms, type PermMeta } from "./callbacks";
 import { isSttReady, isMacOS, checkSttStatus } from "./stt";
 import { skipToEnd } from "./watcher";
 import { isAssistantMessage, isSystemInit, isTaskStarted, isTaskNotification, isResult, isResultError } from "./sdk-types";
@@ -121,14 +121,25 @@ function startTyping(config: TelegramConfig, chatId: number): () => void {
 }
 
 // ---------- per-session auto-allow ----------
-const sessionAutoAllowMap = new Map<string, boolean>();
+const sessionAutoAllowTools = new Map<string, Set<string>>();
+const sessionYolo = new Map<string, boolean>();
 
 export function resetSessionAutoAllow(sessionId: string): void {
-  sessionAutoAllowMap.delete(sessionId);
+  sessionAutoAllowTools.delete(sessionId);
+  sessionYolo.delete(sessionId);
 }
 
 export function setSessionAutoAllow(sessionId: string): void {
-  sessionAutoAllowMap.set(sessionId, true);
+  sessionYolo.set(sessionId, true);
+}
+
+export function setSessionToolAllow(sessionId: string, toolName: string): void {
+  let tools = sessionAutoAllowTools.get(sessionId);
+  if (!tools) {
+    tools = new Set();
+    sessionAutoAllowTools.set(sessionId, tools);
+  }
+  tools.add(toolName);
 }
 
 // ---------- session message suppression (for session switch) ----------
@@ -216,12 +227,18 @@ function buildCanUseTool(ctx: HandlerContext, chatId: number, messageId: number,
       }
     }
 
-    // 2) Yolo mode or session auto-allow → auto-allow everything
-    if (ctx.yolo || sessionAutoAllowMap.get(sessionId)) {
+    // 2) Yolo mode or session yolo → auto-allow everything
+    if (ctx.yolo || sessionYolo.get(sessionId)) {
       return { behavior: "allow" as const, updatedInput: input };
     }
 
-    // 3) Non-yolo → Allow/Deny/Allow all inline keyboard
+    // 3) Per-tool session allow
+    const allowedTools = sessionAutoAllowTools.get(sessionId);
+    if (allowedTools?.has(toolName)) {
+      return { behavior: "allow" as const, updatedInput: input };
+    }
+
+    // 4) Non-yolo → Allow/Deny/Allow tool/Yolo inline keyboard
     const permId = crypto.randomUUID().slice(0, 8);
     const reason = decisionReason ? `<i>${escapeHtml(decisionReason)}</i>` : "Allow?";
     const buttons = [
@@ -230,7 +247,10 @@ function buildCanUseTool(ctx: HandlerContext, chatId: number, messageId: number,
         { text: "Deny", callback_data: `perm:${permId}:deny` },
       ],
       [
-        { text: "Allow all", callback_data: `perm:${permId}:allowall:${sessionId}` },
+        { text: `Allow ${toolName} for session`, callback_data: `perm:${permId}:tool` },
+      ],
+      [
+        { text: "Yolo for session", callback_data: `perm:${permId}:yolo` },
       ],
     ];
     await sendMessage(ctx.telegram, chatId, reason, {
@@ -238,7 +258,7 @@ function buildCanUseTool(ctx: HandlerContext, chatId: number, messageId: number,
       parseMode: "HTML",
       replyMarkup: { inline_keyboard: buttons },
     });
-    const result = await registerPendingPerm(permId);
+    const result = await registerPendingPerm(permId, { sessionId, toolName });
     if (result === "allow" || result === "allowall") {
       return { behavior: "allow" as const, updatedInput: input };
     }
