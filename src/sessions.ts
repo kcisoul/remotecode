@@ -16,6 +16,7 @@ export {
   readLastTurns,
   buildSessionGrid,
   buildSessionDisplay,
+  buildProjectSessionDisplay,
   sessionsReplyKeyboard,
 } from "./session-ui";
 export type { InlineButton } from "./session-ui";
@@ -297,6 +298,30 @@ export function findSession(query: string): SessionInfo | null {
   for (const s of sessions) if (s.slug?.toLowerCase() === q) return s;
   for (const s of sessions) if (s.sessionId === query) return s;
   for (const s of sessions) if (s.sessionId.startsWith(query)) return s;
+
+  // Fallback: scan filesystem directly for prefix match (handles old sessions beyond limit)
+  if (query.length >= 8) {
+    const pDir = projectsDir();
+    if (!fs.existsSync(pDir)) return null;
+    try {
+      for (const dir of fs.readdirSync(pDir)) {
+        const dirPath = path.join(pDir, dir);
+        if (!fs.statSync(dirPath).isDirectory()) continue;
+        for (const file of fs.readdirSync(dirPath)) {
+          if (!file.endsWith(".jsonl")) continue;
+          const name = file.slice(0, -6);
+          if (!UUID_RE.test(name)) continue;
+          if (name === query || name.startsWith(query)) {
+            const filePath = path.join(dirPath, file);
+            const mtime = fs.statSync(filePath).mtimeMs / 1000;
+            const info = candidateToSessionInfo(mtime, filePath, dir);
+            if (info) return info;
+          }
+        }
+      }
+    } catch { /* ignore */ }
+  }
+
   return null;
 }
 

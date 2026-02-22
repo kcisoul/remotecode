@@ -26,8 +26,8 @@ import {
   formatTimeAgo,
   formatSessionLabel,
   readLastTurns,
-  buildSessionGrid,
   buildSessionDisplay,
+  buildProjectSessionDisplay,
   sessionsReplyKeyboard,
 } from "./session-ui";
 
@@ -120,27 +120,29 @@ function stopOldSession(sessionsFile: string, newSessionId?: string): void {
   }
 }
 
-// ---------- project list markup ----------
-export function buildProjectListMarkup(): { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> } {
+// ---------- project list display ----------
+const I = "\u00a0\u00a0\u00a0";
+export function buildProjectListDisplay(): { text: string } {
   const projects = discoverProjects();
-  const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
 
-  if (projects.length > 0) {
-    for (const p of projects) {
-      let label = p.projectName;
-      if (label.length > 16) label = label.slice(0, 13) + "..";
-      const timeAgo = formatTimeAgo(p.lastModified);
-      const count = p.sessionCount > 5 ? "5+" : String(p.sessionCount);
-      buttons.push([
-        { text: `${label}  [${count}]  ${timeAgo}`, callback_data: `proj:${p.encodedDir}` },
-      ]);
-    }
-  } else {
-    buttons.push([{ text: "No projects found", callback_data: "proj:noop" }]);
+  if (projects.length === 0) {
+    return { text: "No projects found." };
   }
 
-  buttons.push([{ text: "Close", callback_data: "proj:close" }]);
-  return { inline_keyboard: buttons };
+  const blocks: string[] = [];
+  for (let i = 0; i < projects.length; i++) {
+    const p = projects[i];
+    const name = escapeHtml(p.projectName);
+    const timeAgo = formatTimeAgo(p.lastModified);
+    const count = p.sessionCount > 5 ? "5+" : String(p.sessionCount);
+    const safeName = p.projectName.replace(/[^a-zA-Z0-9_]/g, "_");
+
+    const info = `\u2022 <b>${name}</b>\n${I}${count} sessions  \u00b7  <code>${timeAgo}</code>`;
+    const cmd = `<blockquote>/show_sessions_${safeName}</blockquote>`;
+    blocks.push(info + "\n" + cmd);
+  }
+
+  return { text: blocks.join("\n\n") };
 }
 
 // ---------- main callback handler ----------
@@ -262,7 +264,8 @@ async function handleProjectCallback(
 
   if (action === "list" || action === "back") {
     try {
-      await editMessageText(ctx.telegram, chatId, messageId, "Projects:", { replyMarkup: buildProjectListMarkup() });
+      const projDisplay = buildProjectListDisplay();
+      await editMessageText(ctx.telegram, chatId, messageId, projDisplay.text, { parseMode: "HTML" });
     } catch (err) { logger.debug("callback", `editMessageText projects: ${errorMessage(err)}`); }
     return;
   }
@@ -286,23 +289,13 @@ async function handleProjectCallback(
   const encodedDir = action;
   const sessions = discoverProjectSessions(encodedDir, 5);
   const activeId = loadActiveSessionId(ctx.sessionsFile);
-  const buttons = buildSessionGrid(sessions, activeId, { showDir: false });
-
-  if (sessions.length === 0) {
-    buttons.push([{ text: "No sessions", callback_data: "proj:noop" }]);
-  }
-
-  buttons.push([
-    { text: "\u2190 Back", callback_data: "proj:back" },
-    { text: "+ New", callback_data: `proj:new:${encodedDir}` },
-    { text: "Close", callback_data: "proj:close" },
-  ]);
-
   const projectName = sessions.length > 0 ? sessions[0].projectName : encodedDir;
+  const display = buildProjectSessionDisplay(sessions, activeId, projectName, encodedDir);
 
   try {
-    await editMessageText(ctx.telegram, chatId, messageId, `${projectName} sessions:`, {
-      replyMarkup: { inline_keyboard: buttons },
+    await editMessageText(ctx.telegram, chatId, messageId, display.text, {
+      parseMode: "HTML",
+      replyMarkup: { inline_keyboard: display.buttons },
     });
   } catch (err) { logger.debug("callback", `editMessageText projSessions: ${errorMessage(err)}`); }
 }

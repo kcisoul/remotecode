@@ -95,6 +95,7 @@ interface SessionState {
   turnLock: Promise<void>;
   releaseTurn: (() => void) | null;
   interrupted: boolean;
+  stale: boolean;
 }
 
 const sessions = new Map<string, SessionState>();
@@ -132,6 +133,14 @@ export function hasSession(sessionId: string): boolean {
   return sessions.has(sessionId);
 }
 
+export function markSessionStale(sessionId: string): void {
+  const s = sessions.get(sessionId);
+  if (s) {
+    logger.debug("claude", `marking session ${sessionId.slice(0, 8)} as stale (external changes detected)`);
+    s.stale = true;
+  }
+}
+
 // ---------- main query function ----------
 
 export async function* querySession(
@@ -140,6 +149,15 @@ export async function* querySession(
 ): AsyncGenerator<SDKMessage> {
   const sessionId = options.sessionId!;
   let session = sessions.get(sessionId);
+
+  // Stale session: external changes detected, recreate to pick up new JSONL context
+  if (session?.stale) {
+    logger.debug("claude", `recreating stale session ${sessionId.slice(0, 8)}`);
+    session.channel.close();
+    session.q.close();
+    sessions.delete(sessionId);
+    session = undefined;
+  }
 
   if (session) {
     // Wait for session's turn lock
@@ -213,6 +231,7 @@ export async function* querySession(
       turnLock: Promise.resolve(),
       releaseTurn: null,
       interrupted: false,
+      stale: false,
     };
 
     sessions.set(sessionId, newSession);

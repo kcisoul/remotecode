@@ -140,48 +140,76 @@ export function buildSessionGrid(
   return buttons;
 }
 
+// Non-breaking space for indentation
+const I = "\u00a0\u00a0\u00a0";
+
+function buildSessionBlock(
+  s: SessionInfo,
+  num: number,
+  isActive: boolean,
+): string {
+  const timeAgo = formatTimeAgo(s.lastModified);
+  const prefix = s.sessionId.slice(0, 8);
+  const maxPreview = 100;
+
+  const preview = s.lastMessage || s.firstMessage || s.slug || "";
+  const trimmed = preview.length > maxPreview
+    ? preview.slice(0, maxPreview - 3) + "..."
+    : preview;
+
+  const header = isActive
+    ? `\u2022 <b><u>${escapeHtml(s.projectName)}  [current]</u></b>`
+    : `\u2022 <b>${escapeHtml(s.projectName)}</b>`;
+
+  const lines = [header];
+  if (trimmed) lines.push(`${I}${escapeHtml(trimmed)}`);
+  lines.push(`${I}<code>${timeAgo}</code>`);
+
+  const info = lines.join("\n");
+
+  if (isActive) return info + "\n" + `<blockquote>current session</blockquote>`;
+
+  return info + "\n" + `<blockquote>/switch_to_${prefix}</blockquote>`;
+}
+
 export function buildSessionDisplay(
   sessions: SessionInfo[],
   activeId: string | null,
 ): { text: string; buttons: Array<Array<InlineButton>> } {
+  const buttons: Array<Array<InlineButton>> = [
+    [{ text: "+ New session", callback_data: "sess:new" }],
+  ];
+
   if (sessions.length === 0) {
-    return {
-      text: "No sessions found.",
-      buttons: [[{ text: "+ New session", callback_data: "sess:new" }]],
-    };
+    return { text: "No sessions found.", buttons };
   }
 
   const blocks: string[] = [];
-  const buttons: Array<Array<InlineButton>> = [];
-  const maxPreview = 100;
-
   for (let i = 0; i < sessions.length; i++) {
-    const s = sessions[i];
-    const num = i + 1;
-    const isActive = s.sessionId === activeId;
-    const timeAgo = formatTimeAgo(s.lastModified);
-
-    const preview = s.lastMessage || s.firstMessage || s.slug || "";
-    const trimmed = preview.length > maxPreview
-      ? preview.slice(0, maxPreview - 3) + "..."
-      : preview;
-
-    const header = isActive
-      ? `<b><u>${num}. ${escapeHtml(s.projectName)}  [current]</u></b>`
-      : `<b>${num}. ${escapeHtml(s.projectName)}</b>`;
-
-    const lines = [header, ""];
-    if (trimmed) lines.push(escapeHtml(trimmed), "");
-    lines.push(`<i>${timeAgo}</i>`);
-
-    blocks.push(`<blockquote>${lines.join("\n")}</blockquote>`);
-
-    if (!isActive) {
-      buttons.push([{ text: `Switch to session ${num}`, callback_data: `sess:${s.sessionId}` }]);
-    }
+    blocks.push(buildSessionBlock(sessions[i], i + 1, sessions[i].sessionId === activeId));
   }
 
-  buttons.push([{ text: "+ New session", callback_data: "sess:new" }]);
+  return { text: blocks.join("\n\n"), buttons };
+}
+
+export function buildProjectSessionDisplay(
+  sessions: SessionInfo[],
+  activeId: string | null,
+  projectName: string,
+  encodedDir: string,
+): { text: string; buttons: Array<Array<InlineButton>> } {
+  const buttons: Array<Array<InlineButton>> = [
+    [{ text: "+ New session", callback_data: `proj:new:${encodedDir}` }],
+  ];
+
+  if (sessions.length === 0) {
+    return { text: `${escapeHtml(projectName)}: no sessions.`, buttons };
+  }
+
+  const blocks: string[] = [];
+  for (let i = 0; i < sessions.length; i++) {
+    blocks.push(buildSessionBlock(sessions[i], i + 1, sessions[i].sessionId === activeId));
+  }
 
   return { text: blocks.join("\n\n"), buttons };
 }

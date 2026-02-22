@@ -90,11 +90,22 @@ export function getUpdates(config: TelegramConfig, offset: number, timeout: numb
 
 const TELEGRAM_MSG_LIMIT = 4096;
 
+// U+2800 (Braille Pattern Blank) filler forces the message bubble to full chat width
+const WIDE_FILLER = "\u2800".repeat(35);
+
+function widenForInlineKeyboard(text: string, replyMarkup?: Record<string, unknown>): string {
+  if (replyMarkup && "inline_keyboard" in replyMarkup) {
+    return text + "\n" + WIDE_FILLER;
+  }
+  return text;
+}
+
 export async function sendMessage(config: TelegramConfig, chatId: number, text: string, options?: SendMessageOptions): Promise<number> {
   logger.debug("telegram", `OUT message chat_id=${chatId} text=${text}`);
   if (text.length > TELEGRAM_MSG_LIMIT) {
     text = text.slice(0, TELEGRAM_MSG_LIMIT - 15) + "\n...[truncated]";
   }
+  text = widenForInlineKeyboard(text, options?.replyMarkup);
   const payload: Record<string, unknown> = { chat_id: chatId, text };
   if (options?.replyToMessageId) payload.reply_to_message_id = options.replyToMessageId;
   if (options?.replyMarkup) payload.reply_markup = options.replyMarkup;
@@ -136,6 +147,7 @@ export function setMyCommands(config: TelegramConfig, commands: Array<{ command:
 }
 
 export function editMessageText(config: TelegramConfig, chatId: number, messageId: number, text: string, options?: { replyMarkup?: Record<string, unknown>; parseMode?: string }): Promise<void> {
+  text = widenForInlineKeyboard(text, options?.replyMarkup);
   const payload: Record<string, unknown> = { chat_id: chatId, message_id: messageId, text };
   if (options?.replyMarkup) payload.reply_markup = options.replyMarkup;
   if (options?.parseMode) payload.parse_mode = options.parseMode;

@@ -5,6 +5,7 @@ import { UUID_RE, findSessionFilePath } from "./sessions";
 import { extractMessageContent, parseJsonlLines } from "./jsonl";
 import { readKvFile, readEnvLines, writeEnvLines } from "./config";
 import { activeQueries } from "./context";
+import { markSessionStale } from "./claude";
 import { logger, errorMessage, silentTry } from "./logger";
 
 export function isAutoSyncEnabled(sessionsFile: string): boolean {
@@ -76,6 +77,11 @@ function processNewData(telegram: TelegramConfig, chatId: number): void {
   state.lineBuf = lines.pop() || "";
 
   if (activeQueries.has(currentSessionId)) return;
+
+  // External changes detected — mark persistent session stale so it
+  // recreates on next message (picks up CLI/other-source context)
+  markSessionStale(currentSessionId);
+
   if (!isAutoSyncEnabled(state.sessionsFile!)) return;
 
   for (const entry of parseJsonlLines(lines.join("\n"), "watcher")) {

@@ -4,7 +4,11 @@ import { MODEL_CHOICES } from "./config";
 import { isAutoSyncEnabled, setAutoSync } from "./watcher";
 import {
   loadActiveSessionId,
+  saveActiveSessionId,
+  saveSessionCwd,
   discoverSessions,
+  discoverProjects,
+  discoverProjectSessions,
   findSession,
   createNewSession,
   saveModel,
@@ -14,12 +18,13 @@ import {
   formatSessionLabel,
   readLastTurns,
   buildSessionDisplay,
+  buildProjectSessionDisplay,
   sessionsReplyKeyboard,
 } from "./session-ui";
 import { HandlerContext } from "./context";
-import { buildProjectListMarkup, denyAllPending } from "./callbacks";
+import { buildProjectListDisplay, denyAllPending, allowAllPending } from "./callbacks";
 import { interruptSession } from "./claude";
-import { clearQueue, isSessionBusy } from "./handler";
+import { clearQueue, isSessionBusy, suppressSessionMessages, unsuppressSessionMessages, resetSessionAutoAllow, setSessionAutoAllow } from "./handler";
 
 export async function handleCommand(
   text: string,
@@ -70,9 +75,31 @@ export async function handleCommand(
 
   if (command === "/projects") {
     logger.debug("command", `chat_id=${chatId} command=/projects`);
-    await sendMessage(ctx.telegram, chatId, "Projects:", {
+    const projDisplay = buildProjectListDisplay();
+    await sendMessage(ctx.telegram, chatId, projDisplay.text, {
       replyToMessageId: messageId,
-      replyMarkup: buildProjectListMarkup(),
+      parseMode: "HTML",
+    });
+    return true;
+  }
+
+  if (command.startsWith("/show_sessions_")) {
+    const suffix = command.slice("/show_sessions_".length);
+    logger.debug("command", `chat_id=${chatId} command=/show_sessions_ suffix=${suffix}`);
+    const projects = discoverProjects();
+    const match = projects.find(p => p.projectName.replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase() === suffix);
+    if (!match) {
+      await sendMessage(ctx.telegram, chatId, "Project not found.", { replyToMessageId: messageId });
+      return true;
+    }
+    const activeId = loadActiveSessionId(ctx.sessionsFile);
+    const sessions = discoverProjectSessions(match.encodedDir, 5);
+    const projName = sessions.length > 0 ? sessions[0].projectName : match.projectName;
+    const display = buildProjectSessionDisplay(sessions, activeId, projName, match.encodedDir);
+    await sendMessage(ctx.telegram, chatId, display.text, {
+      replyToMessageId: messageId,
+      parseMode: "HTML",
+      replyMarkup: { inline_keyboard: display.buttons },
     });
     return true;
   }
@@ -159,6 +186,7 @@ export async function handleCommand(
 
   if (command === "/new") {
     logger.debug("command", `chat_id=${chatId} command=/new`);
+    stopOldSession(ctx.sessionsFile);
     createNewSession(ctx.sessionsFile);
     await sendMessage(ctx.telegram, chatId, "New session started.", {
       replyToMessageId: messageId,
@@ -167,5 +195,45 @@ export async function handleCommand(
     return true;
   }
 
+  if (command.startsWith("/switch_to_")) {
+    const prefix = command.slice("/switch_to_".length);
+    logger.debug("command", `chat_id=${chatId} command=/switch_to_ prefix=${prefix}`);
+    const session = findSession(prefix);
+    if (!session) {
+      await sendMessage(ctx.telegram, chatId, "Session not found.", { replyToMessageId: messageId });
+      return true;
+    }
+    stopOldSession(ctx.sessionsFile, session.sessionId);
+    saveActiveSessionId(ctx.sessionsFile, session.sessionId);
+    saveSessionCwd(ctx.sessionsFile, session.project);
+    const label = formatSessionLabel(session);
+    const pages = readLastTurns(session.sessionId, 4);
+    const text = pages.length > 0 ? `Switched to: ${label}\n\n${pages[0]}` : `Switched to: ${label}`;
+    await sendMessage(ctx.telegram, chatId, text, {
+      replyToMessageId: messageId,
+      replyMarkup: sessionsReplyKeyboard(ctx.sessionsFile),
+      parseMode: pages.length > 0 ? "HTML" : undefined,
+    });
+    return true;
+  }
+
   return false;
+}
+
+// ---------- stop old session on switch ----------
+function stopOldSession(sessionsFile: string, newSessionId?: string): void {
+  const oldId = loadActiveSessionId(sessionsFile);
+  if (oldId && oldId !== newSessionId) {
+    if (isSessionBusy(oldId)) {
+      suppressSessionMessages(oldId);
+      setSessionAutoAllow(oldId);
+      allowAllPending();
+    } else {
+      resetSessionAutoAllow(oldId);
+      denyAllPending();
+    }
+  }
+  if (newSessionId) {
+    unsuppressSessionMessages(newSessionId);
+  }
 }
