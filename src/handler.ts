@@ -2,7 +2,7 @@ import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
-import { execSync } from "child_process";
+import { spawnSync } from "child_process";
 import { v4 as uuidv4 } from "uuid";
 
 import {
@@ -12,10 +12,10 @@ import {
   sendChatAction,
   downloadFile,
 } from "./telegram";
-import { querySession, closeSession, interruptSession, wasSessionInterrupted, type SDKMessage, type CanUseToolFn } from "./claude";
+import { querySession, closeSession, wasSessionInterrupted, type CanUseToolFn } from "./claude";
 import { mdToTelegramHtml, escapeHtml, tryMdToHtml, truncateMessage } from "./format";
-import { logger, errorMessage } from "./logger";
-import { defaultCwd, whisperModelPath } from "./config";
+import { logger, errorMessage, silentCatch, silentTry } from "./logger";
+import { defaultCwd, whisperModelPath, SILENT_TOOLS } from "./config";
 import {
   getOrCreateSessionId,
   loadSessionCwd,
@@ -27,6 +27,7 @@ import { HandlerContext, isUserAllowed, activeQueries } from "./context";
 import { registerPendingAsk, registerPendingPerm, denyAllPending, hasPendingPerms } from "./callbacks";
 import { isSttReady, isMacOS, checkSttStatus } from "./stt";
 import { skipToEnd } from "./watcher";
+import { isAssistantMessage, isSystemInit, isTaskStarted, isTaskNotification, isResult, isResultError } from "./sdk-types";
 
 // ---------- unauthorized tracking ----------
 const warnedUsers = new Set<string>();
@@ -60,7 +61,8 @@ function pickBestPhotoId(photos: Array<{ file_id: string; file_size?: number; wi
   if (photos.length === 0) return null;
   let best = photos[0];
   for (const photo of photos) {
-    const score = (p: typeof photo) => (p.file_size || 0) || ((p.width || 0) * (p.height || 0));
+    const score = (p: typeof photo) =>
+      p.file_size != null && p.file_size > 0 ? p.file_size : (p.width ?? 0) * (p.height ?? 0);
     if (score(photo) > score(best)) best = photo;
   }
   return best.file_id;
@@ -74,10 +76,13 @@ function isImageDocument(doc?: { mime_type?: string }): boolean {
 // ---------- whisper transcription ----------
 function convertToWav(inputPath: string): string {
   const wavPath = inputPath.replace(/\.[^.]+$/, "") + ".wav";
-  execSync(`ffmpeg -y -i "${inputPath}" -ar 16000 -ac 1 -c:a pcm_s16le "${wavPath}"`, {
-    timeout: 30000,
-    stdio: ["pipe", "pipe", "pipe"],
-  });
+  const result = spawnSync("ffmpeg", [
+    "-y", "-i", inputPath, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wavPath,
+  ], { timeout: 30000, stdio: ["pipe", "pipe", "pipe"] });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    throw new Error(`ffmpeg exited with code ${result.status}: ${result.stderr?.toString("utf-8").slice(0, 200)}`);
+  }
   return wavPath;
 }
 
@@ -91,32 +96,29 @@ function transcribeAudio(audioPath: string): string {
     const modelPath = whisperModelPath();
     const whisperBin = checkSttStatus().whisperCli || "whisper-cli";
     logger.debug("whisper", `transcribing: ${wavPath} (bin: ${whisperBin})`);
-    const output = execSync(
-      `"${whisperBin}" -m "${modelPath}" -l auto --no-timestamps --no-prints -f "${wavPath}"`,
-      { timeout: 60000, stdio: ["pipe", "pipe", "pipe"] },
-    );
-    return output.toString("utf-8").trim();
+    const result = spawnSync(whisperBin, [
+      "-m", modelPath, "-l", "auto", "--no-timestamps", "--no-prints", "-f", wavPath,
+    ], { timeout: 60000, stdio: ["pipe", "pipe", "pipe"] });
+    if (result.error) throw result.error;
+    if (result.status !== 0) {
+      throw new Error(`whisper exited with code ${result.status}: ${result.stderr?.toString("utf-8").slice(0, 200)}`);
+    }
+    return result.stdout.toString("utf-8").trim();
   } finally {
     if (wavPath !== audioPath) {
-      try { fs.unlinkSync(wavPath); } catch { /* ignore */ }
+      silentTry("whisper", "cleanup wav", () => fs.unlinkSync(wavPath));
     }
   }
 }
 
 // ---------- typing indicator ----------
 function startTyping(config: TelegramConfig, chatId: number): () => void {
-  sendChatAction(config, chatId).catch(() => {});
+  silentCatch("typing", "sendChatAction", sendChatAction(config, chatId));
   const interval = setInterval(() => {
-    sendChatAction(config, chatId).catch(() => {});
+    silentCatch("typing", "sendChatAction", sendChatAction(config, chatId));
   }, 4000);
   return () => clearInterval(interval);
 }
-
-// ---------- tool message filtering ----------
-const SILENT_TOOLS = new Set([
-  "TodoWrite", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet",
-  "TodoRead", "AskUserQuestion",
-]);
 
 // ---------- per-session auto-allow ----------
 const sessionAutoAllowMap = new Map<string, boolean>();
@@ -142,8 +144,9 @@ const messageQueue = new Map<string, QueuedMessage[]>();
 const processingTurns = new Set<string>();
 
 function enqueue(sessionId: string, msg: QueuedMessage): void {
-  if (!messageQueue.has(sessionId)) messageQueue.set(sessionId, []);
-  messageQueue.get(sessionId)!.push(msg);
+  const queue = messageQueue.get(sessionId) ?? [];
+  queue.push(msg);
+  messageQueue.set(sessionId, queue);
 }
 
 export function clearQueue(sessionId: string): void {
@@ -266,7 +269,7 @@ async function handleTextMessage(msg: Message, ctx: HandlerContext): Promise<voi
     await handlePrompt(text, chatId, messageId, ctx);
   } catch (err) {
     logger.error("handler", `Error in handleTextMessage: ${errorMessage(err)}`, err);
-    await sendMessage(ctx.telegram, chatId, `Error: ${errorMessage(err)}`, { replyToMessageId: messageId });
+    await sendMessage(ctx.telegram, chatId, `Error: ${escapeHtml(errorMessage(err))}`, { replyToMessageId: messageId });
   }
 }
 
@@ -289,7 +292,7 @@ async function handleImageMessage(msg: Message, ctx: HandlerContext, fileId: str
     await handlePrompt(prompt, chatId, messageId, ctx, [imagePath]);
   } catch (err) {
     logger.error("handler", `Error in handleImageMessage: ${errorMessage(err)}`, err);
-    await sendMessage(ctx.telegram, chatId, `Error: ${errorMessage(err)}`, { replyToMessageId: messageId });
+    await sendMessage(ctx.telegram, chatId, `Error: ${escapeHtml(errorMessage(err))}`, { replyToMessageId: messageId });
   }
 }
 
@@ -327,13 +330,13 @@ async function handleVoiceMessage(msg: Message, ctx: HandlerContext): Promise<vo
     try {
       transcription = transcribeAudio(audioPath);
     } catch (sttErr) {
-      try { fs.unlinkSync(audioPath); } catch { /* ignore */ }
+      silentTry("whisper", "cleanup audio", () => fs.unlinkSync(audioPath));
       const msg = errorMessage(sttErr);
       logger.warn("whisper", `Transcription failed chat_id=${chatId}: ${msg}`);
-      await sendMessage(ctx.telegram, chatId, `Speech-to-text error: ${msg}`, { replyToMessageId: messageId });
+      await sendMessage(ctx.telegram, chatId, `Speech-to-text error: ${escapeHtml(msg)}`, { replyToMessageId: messageId });
       return;
     }
-    try { fs.unlinkSync(audioPath); } catch { /* ignore */ }
+    silentTry("whisper", "cleanup audio", () => fs.unlinkSync(audioPath));
 
     const blankPattern = /^\[.*BLANK.*AUDIO.*\]$|^\(.*blank.*\)$|^\[.*silence.*\]$/i;
     if (!transcription || blankPattern.test(transcription)) {
@@ -346,7 +349,7 @@ async function handleVoiceMessage(msg: Message, ctx: HandlerContext): Promise<vo
     await handlePrompt(transcription, chatId, messageId, ctx, undefined, true);
   } catch (err) {
     logger.error("handler", `Error in handleVoiceMessage: ${errorMessage(err)}`, err);
-    await sendMessage(ctx.telegram, chatId, `Error processing voice: ${errorMessage(err)}`, { replyToMessageId: messageId });
+    await sendMessage(ctx.telegram, chatId, `Error processing voice: ${escapeHtml(errorMessage(err))}`, { replyToMessageId: messageId });
   }
 }
 
@@ -383,6 +386,107 @@ async function handlePrompt(
   await executePrompt(sessionId, formattedPrompt, chatId, messageId, ctx, voiceMode);
 }
 
+// ---------- streaming response ----------
+interface StreamResult {
+  textParts: string[];
+  gotResult: boolean;
+}
+
+async function streamResponse(
+  sessionId: string,
+  prompt: string,
+  chatId: number,
+  messageId: number,
+  ctx: HandlerContext,
+  options: { cwd: string; model?: string },
+): Promise<StreamResult> {
+  const textParts: string[] = [];
+  let gotResult = false;
+
+  for await (const msg of querySession(prompt, {
+    sessionId,
+    cwd: options.cwd,
+    yolo: ctx.yolo,
+    model: options.model,
+    canUseTool: buildCanUseTool(ctx, chatId, messageId, sessionId),
+  })) {
+    if (isSystemInit(msg)) {
+      logger.debug("handler", `session init: ${msg.session_id?.slice(0, 8)}`);
+    }
+
+    if (isAssistantMessage(msg)) {
+      for (const block of msg.message.content) {
+        if (block.type === "text" && "text" in block) {
+          textParts.push(block.text);
+        }
+        if (block.type === "tool_use" && "name" in block && !SILENT_TOOLS.has(block.name)) {
+          const desc = formatToolDescription(block.name, (block as { input?: Record<string, unknown> }).input || {});
+          await sendMessage(ctx.telegram, chatId, desc, {
+            replyToMessageId: messageId,
+            parseMode: "HTML",
+          });
+        }
+      }
+    }
+
+    if (isTaskStarted(msg) && msg.description) {
+      await sendMessage(ctx.telegram, chatId, `<b>Agent:</b> ${escapeHtml(msg.description)}`, {
+        replyToMessageId: messageId,
+        parseMode: "HTML",
+      });
+    }
+    if (isTaskNotification(msg) && msg.summary) {
+      const status = msg.status || "done";
+      await sendMessage(ctx.telegram, chatId, `<b>Agent ${escapeHtml(status)}:</b> ${escapeHtml(msg.summary)}`, {
+        replyToMessageId: messageId,
+        parseMode: "HTML",
+      });
+    }
+
+    if (isResult(msg)) {
+      gotResult = true;
+      if (isResultError(msg) && msg.errors && !wasSessionInterrupted(sessionId)) {
+        const errText = msg.errors.join("\n");
+        await sendMessage(ctx.telegram, chatId, `Error: ${escapeHtml(errText)}`, { replyToMessageId: messageId });
+      }
+    }
+  }
+
+  return { textParts, gotResult };
+}
+
+// ---------- final response sender ----------
+async function sendFinalResponse(
+  textParts: string[],
+  prompt: string,
+  chatId: number,
+  messageId: number,
+  ctx: HandlerContext,
+  voiceMode?: boolean,
+): Promise<void> {
+  const fullText = textParts.join("\n").trim().replace(/<thinking>[\s\S]*?<\/thinking>\s*/g, "").trim();
+  if (!fullText) return;
+
+  if (voiceMode) {
+    const userHtml = mdToTelegramHtml(prompt);
+    const botHtml = mdToTelegramHtml(truncateMessage(fullText, 3200));
+    const formatted = `<blockquote><b><code>You:</code></b>\n${userHtml}\n\n<b><code>Bot:</code></b>\n${botHtml}</blockquote>`;
+    await sendMessage(ctx.telegram, chatId, formatted, {
+      replyToMessageId: messageId,
+      replyMarkup: sessionsReplyKeyboard(ctx.sessionsFile),
+      parseMode: "HTML",
+    });
+  } else {
+    const formatted = tryMdToHtml(fullText);
+    await sendMessage(ctx.telegram, chatId, formatted.text, {
+      replyToMessageId: messageId,
+      replyMarkup: sessionsReplyKeyboard(ctx.sessionsFile),
+      parseMode: formatted.parseMode,
+    });
+  }
+}
+
+// ---------- prompt execution orchestrator ----------
 async function executePrompt(
   sessionId: string,
   prompt: string,
@@ -398,93 +502,13 @@ async function executePrompt(
   activeQueries.add(sessionId);
   const stopTyping = startTyping(ctx.telegram, chatId);
 
-  const textParts: string[] = [];
-  let gotResult = false;
-
   try {
-    for await (const msg of querySession(prompt, {
-      sessionId,
-      cwd,
-      yolo: ctx.yolo,
-      model,
-      canUseTool: buildCanUseTool(ctx, chatId, messageId, sessionId),
-    })) {
-      // Log init
-      if (msg.type === "system" && msg.subtype === "init") {
-        const initMsg = msg as SDKMessage & { session_id: string };
-        logger.debug("handler", `session init: ${initMsg.session_id?.slice(0, 8)}`);
-      }
+    const { textParts, gotResult } = await streamResponse(
+      sessionId, prompt, chatId, messageId, ctx, { cwd, model },
+    );
 
-      // Stream assistant messages
-      if (msg.type === "assistant") {
-        const assistantMsg = msg as SDKMessage & { message: { content: Array<{ type: string; text?: string; name?: string; input?: Record<string, unknown> }> } };
-        for (const block of assistantMsg.message.content) {
-          if (block.type === "text" && block.text) {
-            textParts.push(block.text);
-          }
-          if (block.type === "tool_use" && block.name && !SILENT_TOOLS.has(block.name)) {
-            const desc = formatToolDescription(block.name, block.input || {});
-            await sendMessage(ctx.telegram, chatId, desc, {
-              replyToMessageId: messageId,
-              parseMode: "HTML",
-            });
-          }
-        }
-      }
-
-      // Subagent events
-      if (msg.type === "system") {
-        const sysMsg = msg as SDKMessage & { subtype: string; description?: string; status?: string; summary?: string; task_id?: string };
-        if (sysMsg.subtype === "task_started" && sysMsg.description) {
-          await sendMessage(ctx.telegram, chatId, `<b>Agent:</b> ${escapeHtml(sysMsg.description)}`, {
-            replyToMessageId: messageId,
-            parseMode: "HTML",
-          });
-        }
-        if (sysMsg.subtype === "task_notification" && sysMsg.summary) {
-          const status = sysMsg.status || "done";
-          await sendMessage(ctx.telegram, chatId, `<b>Agent ${escapeHtml(status)}:</b> ${escapeHtml(sysMsg.summary)}`, {
-            replyToMessageId: messageId,
-            parseMode: "HTML",
-          });
-        }
-      }
-
-      // Handle result
-      if (msg.type === "result") {
-        gotResult = true;
-        const resultMsg = msg as SDKMessage & { is_error: boolean; errors?: string[]; total_cost_usd?: number; num_turns?: number };
-        if (resultMsg.is_error && resultMsg.errors && !wasSessionInterrupted(sessionId)) {
-          const errText = resultMsg.errors.join("\n");
-          await sendMessage(ctx.telegram, chatId, `Error: ${errText}`, { replyToMessageId: messageId });
-        }
-      }
-    }
-
-    // If query was closed externally (session switch / cancel), don't send text
     if (!gotResult) return;
-
-    // Send collected text response
-    const fullText = textParts.join("\n").trim().replace(/<thinking>[\s\S]*?<\/thinking>\s*/g, "").trim();
-    if (fullText) {
-      if (voiceMode) {
-        const userHtml = mdToTelegramHtml(prompt);
-        const botHtml = mdToTelegramHtml(truncateMessage(fullText, 3200));
-        const formatted = `<blockquote><b><code>You:</code></b>\n${userHtml}\n\n<b><code>Bot:</code></b>\n${botHtml}</blockquote>`;
-        await sendMessage(ctx.telegram, chatId, formatted, {
-          replyToMessageId: messageId,
-          replyMarkup: sessionsReplyKeyboard(ctx.sessionsFile),
-          parseMode: "HTML",
-        });
-      } else {
-        const formatted = tryMdToHtml(fullText);
-        await sendMessage(ctx.telegram, chatId, formatted.text, {
-          replyToMessageId: messageId,
-          replyMarkup: sessionsReplyKeyboard(ctx.sessionsFile),
-          parseMode: formatted.parseMode,
-        });
-      }
-    }
+    await sendFinalResponse(textParts, prompt, chatId, messageId, ctx, voiceMode);
   } finally {
     stopTyping();
     skipToEnd();

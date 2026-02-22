@@ -1,7 +1,7 @@
 import * as path from "path";
 import { query, type SDKMessage, type SDKUserMessage, type PermissionResult, type Query } from "@anthropic-ai/claude-agent-sdk";
 import { findSessionFilePath } from "./sessions";
-import { logger } from "./logger";
+import { logger, errorMessage } from "./logger";
 
 // Ensure SDK subprocess can find `node` even when running as a daemon
 // (daemon PATH may not include the node binary directory)
@@ -70,7 +70,7 @@ class MessageChannel implements AsyncIterable<SDKUserMessage> {
             self.waiter = resolve;
           });
         }
-        return { value: undefined as unknown as SDKUserMessage, done: true };
+        return { value: undefined, done: true } as IteratorReturnResult<undefined>;
       },
     };
   }
@@ -153,7 +153,7 @@ export async function* querySession(
 
     // Update model if needed
     if (options.model) {
-      try { await session.q.setModel(options.model); } catch { /* ignore */ }
+      try { await session.q.setModel(options.model); } catch (err) { logger.debug("claude", `setModel: ${errorMessage(err)}`); }
     }
 
     // Feed new message via channel

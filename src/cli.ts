@@ -51,7 +51,7 @@ export async function cmdStop(): Promise<void> {
     }
   }
   console.error(`Process ${pid} did not exit in time. Sending SIGKILL...`);
-  try { process.kill(pid, "SIGKILL"); } catch { /* ignore */ }
+  try { process.kill(pid, "SIGKILL"); } catch { /* process already exited */ }
   killOrphanDaemons();
   console.log("RemoteCode killed.");
 }
@@ -111,7 +111,7 @@ export function cmdStatus(): void {
   try {
     const pidStat = fs.statSync(pidFilePath());
     uptime = formatUptime(Date.now() - pidStat.mtimeMs);
-  } catch { /* ignore */ }
+  } catch { /* pid file may not exist */ }
 
   const sessionsFile = sessionsFilePath();
   const activeId = loadActiveSessionId(sessionsFile);

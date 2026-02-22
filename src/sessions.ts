@@ -3,6 +3,11 @@ import * as path from "path";
 import * as os from "os";
 import { v4 as uuidv4 } from "uuid";
 import { readKvFile, readEnvLines, writeEnvLines } from "./config";
+import { logger, errorMessage } from "./logger";
+import { parseJsonlLines, extractMessageContent, cleanFirstMessage } from "./jsonl";
+
+// Re-export jsonl utilities for backward compatibility
+export { extractMessageContent } from "./jsonl";
 
 // Re-export UI functions for backward compatibility
 export {
@@ -86,31 +91,6 @@ function projectDisplayName(encodedDir: string): string {
 }
 
 // ---------- JSONL parsing ----------
-export function extractMessageContent(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    for (const block of content) {
-      if (block && typeof block === "object" && (block as Record<string, unknown>).type === "text") {
-        const text = (block as Record<string, unknown>).text;
-        if (typeof text === "string") return text;
-      }
-    }
-  }
-  return "";
-}
-
-function cleanFirstMessage(text: string): string | null {
-  let msg = text;
-  if (msg.startsWith("User said:\n")) msg = msg.slice("User said:\n".length);
-  msg = msg.replace(/\n+Reply concisely\.?\s*$/, "");
-  msg = msg.replace(/\n+Image file path\(s\):.*/s, "");
-  msg = msg.trim();
-  if (!msg || msg.startsWith("<") || msg.startsWith("#")) return null;
-  const firstLine = msg.split("\n", 1)[0].trim();
-  if (!firstLine) return null;
-  if (firstLine.length > 60) return firstLine.slice(0, 57) + "...";
-  return firstLine;
-}
 
 interface ParsedSession {
   slug: string | null;
@@ -125,10 +105,7 @@ function parseSessionFile(filePath: string): ParsedSession | null {
     let firstMessage: string | null = null;
     let lastMessage: string | null = null;
 
-    for (const line of content.split("\n")) {
-      if (!line.trim()) continue;
-      let entry: Record<string, unknown>;
-      try { entry = JSON.parse(line); } catch { continue; }
+    for (const entry of parseJsonlLines(content, "sessions")) {
       if (!slug && entry.slug) slug = entry.slug as string;
       if (entry.type === "user" && !entry.isMeta) {
         const msgObj = entry.message as Record<string, unknown> | undefined;
@@ -199,7 +176,7 @@ export function findSessionFilePath(sessionId: string): string | null {
       const candidate = path.join(dirPath, `${sessionId}.jsonl`);
       if (fs.existsSync(candidate)) return candidate;
     }
-  } catch { /* ignore */ }
+  } catch (err) { logger.debug("sessions", `findSessionFilePath scan: ${errorMessage(err)}`); }
   return null;
 }
 
@@ -212,7 +189,7 @@ function listSessionCandidates(dirPath: string): Array<{ mtime: number; filePath
       const filePath = path.join(dirPath, file);
       candidates.push({ mtime: fs.statSync(filePath).mtimeMs / 1000, filePath });
     }
-  } catch { /* ignore */ }
+  } catch (err) { logger.debug("sessions", `listSessionCandidates: ${errorMessage(err)}`); }
   candidates.sort((a, b) => b.mtime - a.mtime);
   return candidates;
 }

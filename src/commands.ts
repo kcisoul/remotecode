@@ -1,5 +1,6 @@
 import { sendMessage } from "./telegram";
 import { logger } from "./logger";
+import { MODEL_CHOICES } from "./config";
 import { isAutoSyncEnabled, setAutoSync } from "./watcher";
 import {
   loadActiveSessionId,
@@ -130,11 +131,9 @@ export async function handleCommand(
       await sendMessage(ctx.telegram, chatId, `Model: ${arg}`, { replyToMessageId: messageId });
     } else {
       const current = loadModel(ctx.sessionsFile);
-      const buttons = [
-        [{ text: "Sonnet 4.5", callback_data: "model:claude-sonnet-4-5-20250929" }],
-        [{ text: "Opus 4.6", callback_data: "model:claude-opus-4-6" }],
-        [{ text: "Haiku 4.5", callback_data: "model:claude-haiku-4-5-20251001" }],
-      ];
+      const buttons = MODEL_CHOICES.map(({ label, modelId }) => [
+        { text: label, callback_data: `model:${modelId}` },
+      ]);
       const label = current ? `Current model: ${current}` : "Select model:";
       await sendMessage(ctx.telegram, chatId, label, {
         replyToMessageId: messageId,

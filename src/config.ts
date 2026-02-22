@@ -118,3 +118,16 @@ export function getConfig(): Config {
 
   return { botToken, allowedUsers, yolo, verbose };
 }
+
+/** Tool names whose tool_use messages are not forwarded to Telegram. */
+export const SILENT_TOOLS = new Set([
+  "TodoWrite", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet",
+  "TodoRead", "AskUserQuestion",
+]);
+
+/** Model choices shown in the /model inline keyboard. */
+export const MODEL_CHOICES: Array<{ label: string; modelId: string }> = [
+  { label: "Sonnet 4.5", modelId: "claude-sonnet-4-5-20250929" },
+  { label: "Opus 4.6", modelId: "claude-opus-4-6" },
+  { label: "Haiku 4.5", modelId: "claude-haiku-4-5-20251001" },
+];

@@ -38,3 +38,13 @@ export const logger = {
     if (err && isVerbose()) console.error(err);
   },
 };
+
+/** Swallow a promise rejection with debug logging. Use for fire-and-forget async ops. */
+export function silentCatch(tag: string, desc: string, promise: Promise<unknown>): void {
+  promise.catch((err) => { logger.debug(tag, `${desc}: ${errorMessage(err)}`); });
+}
+
+/** Synchronous try/catch with debug logging. Returns undefined on error. */
+export function silentTry<T>(tag: string, desc: string, fn: () => T): T | undefined {
+  try { return fn(); } catch (err) { logger.debug(tag, `${desc}: ${errorMessage(err)}`); return undefined; }
+}

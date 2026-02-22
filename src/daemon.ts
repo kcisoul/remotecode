@@ -43,7 +43,7 @@ export function isDaemonRunning(): { running: boolean; pid: number | null } {
   if (pid === null) return { running: false, pid: null };
   if (isRunning(pid)) return { running: true, pid };
   // Stale PID file -- clean up
-  try { fs.unlinkSync(pidFilePath()); } catch { /* ignore */ }
+  try { fs.unlinkSync(pidFilePath()); } catch (err) { logger.debug("daemon", `stale pid cleanup: ${errorMessage(err)}`); }
   return { running: false, pid: null };
 }
 
@@ -57,7 +57,7 @@ function removePid(): void {
     if (content === String(process.pid)) {
       fs.unlinkSync(pidFilePath());
     }
-  } catch { /* ignore */ }
+  } catch (err) { logger.debug("daemon", `removePid: ${errorMessage(err)}`); }
 }
 
 /** Kill any orphaned --daemon processes (PID file missing but process alive) */
@@ -73,9 +73,9 @@ export function killOrphanDaemons(): void {
       try {
         process.kill(pid, "SIGTERM");
         console.log(`  Killed orphan daemon (pid ${pid})`);
-      } catch { /* already dead */ }
+      } catch (err) { logger.debug("daemon", `kill orphan ${pid}: ${errorMessage(err)}`); }
     }
-  } catch { /* ps failed -- ignore */ }
+  } catch (err) { logger.debug("daemon", `killOrphanDaemons: ${errorMessage(err)}`); }
 }
 
 // ---------- Log management ----------
@@ -95,7 +95,7 @@ function setupLogging(): void {
       logStream.end();
       try {
         fs.renameSync(logPath, logPath + ".old");
-      } catch { /* ignore */ }
+      } catch (err) { logger.debug("daemon", `log rotate: ${errorMessage(err)}`); }
       logStream = fs.createWriteStream(logPath, { flags: "a" });
       byteCount = 0;
       patchWrite();
@@ -170,7 +170,7 @@ async function processUpdate(update: Update, ctx: HandlerContext): Promise<void>
     if (chatId) {
       try {
         await sendMessage(ctx.telegram, chatId, `Error: ${errMsg}`);
-      } catch { /* ignore send failure */ }
+      } catch (err2) { logger.debug("poll", `error send failed: ${errorMessage(err2)}`); }
     }
   }
 }

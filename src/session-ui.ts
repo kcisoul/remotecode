@@ -1,11 +1,8 @@
 import * as fs from "fs";
 import { readKvFile } from "./config";
 import { mdToTelegramHtml, escapeHtml } from "./format";
-import {
-  SessionInfo,
-  extractMessageContent,
-  findSessionFilePath,
-} from "./sessions";
+import { SessionInfo, findSessionFilePath } from "./sessions";
+import { parseJsonlLines, extractMessageContent, cleanUserMessage } from "./jsonl";
 
 // ---------- formatting helpers ----------
 export function formatTimeAgo(mtime: number): string {
@@ -28,14 +25,6 @@ export function formatSessionLabel(session: SessionInfo): string {
 }
 
 // ---------- history rendering ----------
-function cleanUserMessage(text: string): string {
-  let msg = text;
-  if (msg.startsWith("User said:\n")) msg = msg.slice("User said:\n".length);
-  msg = msg.replace(/\n+Reply concisely\.?\s*$/, "");
-  msg = msg.replace(/\n+Image file path\(s\):.*/s, "");
-  return msg.trim();
-}
-
 function safePage(body: string, maxLen: number): string {
   const open = "<blockquote>";
   const close = "</blockquote>";
@@ -52,11 +41,7 @@ export function readLastTurns(sessionId: string, maxTurns: number = 4): string[]
   const turns: Array<{ role: string; text: string }> = [];
   try {
     const content = fs.readFileSync(filePath, "utf-8");
-    for (const line of content.split("\n")) {
-      if (!line.trim()) continue;
-      let entry: Record<string, unknown>;
-      try { entry = JSON.parse(line); } catch { continue; }
-
+    for (const entry of parseJsonlLines(content, "session-ui")) {
       if (entry.type === "user" && !entry.isMeta) {
         const msgObj = entry.message as Record<string, unknown> | undefined;
         const text = extractMessageContent(msgObj?.content).trim();

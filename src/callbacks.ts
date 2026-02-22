@@ -5,7 +5,8 @@ import {
   editMessageText,
   answerCallbackQuery,
 } from "./telegram";
-import { logger, errorMessage } from "./logger";
+import { logger, errorMessage, silentCatch } from "./logger";
+import { escapeHtml } from "./format";
 import { HandlerContext, isUserAllowed } from "./context";
 import { setSessionAutoAllow } from "./handler";
 import {
@@ -106,7 +107,7 @@ export function buildProjectListMarkup(): { inline_keyboard: Array<Array<{ text:
 // ---------- main callback handler ----------
 export async function handleCallbackQuery(callback: CallbackQuery, ctx: HandlerContext): Promise<void> {
   const user = callback.from;
-  try { await answerCallbackQuery(ctx.telegram, callback.id); } catch { /* ignore */ }
+  silentCatch("callback", "answerCallbackQuery", answerCallbackQuery(ctx.telegram, callback.id));
 
   if (!isUserAllowed(user.id, user.username, ctx.allowedIds, ctx.allowedNames)) {
     const chatId = callback.message?.chat.id;
@@ -133,7 +134,7 @@ export async function handleCallbackQuery(callback: CallbackQuery, ctx: HandlerC
     if (data.startsWith("model:")) return handleModelCallback(data, chatId, messageId, ctx);
   } catch (err) {
     logger.error("callback", `Error in handleCallbackQuery: ${errorMessage(err)}`, err);
-    await sendMessage(ctx.telegram, chatId, `Error: ${errorMessage(err)}`, { replyToMessageId: messageId });
+    await sendMessage(ctx.telegram, chatId, `Error: ${escapeHtml(errorMessage(err))}`, { replyToMessageId: messageId });
   }
 }
 
@@ -146,6 +147,7 @@ async function handleAskCallback(
 ): Promise<void> {
   // Format: "ask:<id>:<optionIndex>:<label>"
   const parts = data.split(":");
+  if (parts.length < 4) { logger.warn("callback", `malformed ask data: ${data}`); return; }
   const id = parts[1];
   const label = parts.slice(3).join(":");
   const pending = pendingAsk.get(id);
@@ -154,9 +156,7 @@ async function handleAskCallback(
     pendingAsk.delete(id);
     pending.resolve({ answer: label });
   }
-  try {
-    await editMessageText(ctx.telegram, chatId, messageId, `Selected: ${label}`);
-  } catch { /* ignore */ }
+  silentCatch("callback", "editAskResponse", editMessageText(ctx.telegram, chatId, messageId, `Selected: ${label}`));
 }
 
 // ---------- perm callback ----------
@@ -168,6 +168,7 @@ async function handlePermCallback(
 ): Promise<void> {
   // Format: "perm:<id>:allow" or "perm:<id>:deny" or "perm:<id>:allowall:<sessionId>"
   const parts = data.split(":");
+  if (parts.length < 3) { logger.warn("callback", `malformed perm data: ${data}`); return; }
   const id = parts[1];
   const decision = parts[2] as "allow" | "deny" | "allowall";
   const pending = pendingPerm.get(id);
@@ -180,9 +181,7 @@ async function handlePermCallback(
     pending.resolve(decision);
   }
   const labels: Record<string, string> = { allow: "Allowed", deny: "Denied", allowall: "Allowed (all)" };
-  try {
-    await editMessageText(ctx.telegram, chatId, messageId, labels[decision] || decision);
-  } catch { /* ignore */ }
+  silentCatch("callback", "editPermResponse", editMessageText(ctx.telegram, chatId, messageId, labels[decision] || decision));
 }
 
 // ---------- model callback ----------
@@ -194,9 +193,7 @@ async function handleModelCallback(
 ): Promise<void> {
   const model = data.slice("model:".length);
   saveModel(ctx.sessionsFile, model);
-  try {
-    await editMessageText(ctx.telegram, chatId, messageId, `Model: ${model}`);
-  } catch { /* ignore */ }
+  silentCatch("callback", "editModelResponse", editMessageText(ctx.telegram, chatId, messageId, `Model: ${model}`));
 }
 
 // ---------- project callback ----------
@@ -212,12 +209,12 @@ async function handleProjectCallback(
   if (action === "list" || action === "back") {
     try {
       await editMessageText(ctx.telegram, chatId, messageId, "Projects:", { replyMarkup: buildProjectListMarkup() });
-    } catch { /* ignore */ }
+    } catch (err) { logger.debug("callback", `editMessageText projects: ${errorMessage(err)}`); }
     return;
   }
 
   if (action === "close") {
-    try { await deleteMessage(ctx.telegram, chatId, messageId); } catch { /* ignore */ }
+    silentCatch("callback", "deleteMessage proj:close", deleteMessage(ctx.telegram, chatId, messageId));
     return;
   }
 
@@ -227,7 +224,7 @@ async function handleProjectCallback(
     denyAllPending();
     createNewSession(ctx.sessionsFile, projectPath);
     const name = projectPath.split("/").pop() || projectPath;
-    try { await deleteMessage(ctx.telegram, chatId, messageId); } catch { /* ignore */ }
+    silentCatch("callback", "deleteMessage proj:new", deleteMessage(ctx.telegram, chatId, messageId));
     await sendMessage(ctx.telegram, chatId, `New session in ${name}`, { replyMarkup: sessionsReplyKeyboard(ctx.sessionsFile) });
     return;
   }
@@ -253,7 +250,7 @@ async function handleProjectCallback(
     await editMessageText(ctx.telegram, chatId, messageId, `${projectName} sessions:`, {
       replyMarkup: { inline_keyboard: buttons },
     });
-  } catch { /* ignore */ }
+  } catch (err) { logger.debug("callback", `editMessageText projSessions: ${errorMessage(err)}`); }
 }
 
 // ---------- session callback ----------
@@ -275,19 +272,19 @@ async function handleSessionCallback(
         parseMode: "HTML",
         replyMarkup: { inline_keyboard: display.buttons },
       });
-    } catch { /* ignore */ }
+    } catch (err) { logger.debug("callback", `editMessageText sessList: ${errorMessage(err)}`); }
     return;
   }
 
   if (action === "close") {
-    try { await deleteMessage(ctx.telegram, chatId, messageId); } catch { /* ignore */ }
+    silentCatch("callback", "deleteMessage sess:close", deleteMessage(ctx.telegram, chatId, messageId));
     return;
   }
 
   if (action === "new") {
     denyAllPending();
     createNewSession(ctx.sessionsFile);
-    try { await deleteMessage(ctx.telegram, chatId, messageId); } catch { /* ignore */ }
+    silentCatch("callback", "deleteMessage sess:new", deleteMessage(ctx.telegram, chatId, messageId));
     await sendMessage(ctx.telegram, chatId, "New session started.", { replyMarkup: sessionsReplyKeyboard(ctx.sessionsFile) });
     return;
   }
@@ -307,7 +304,7 @@ async function handleSessionCallback(
   const label = formatSessionLabel(session);
   const pages = readLastTurns(session.sessionId, 4);
   const text = pages.length > 0 ? `Switched to: ${label}\n\n${pages[0]}` : `Switched to: ${label}`;
-  try { await deleteMessage(ctx.telegram, chatId, messageId); } catch { /* ignore */ }
+  silentCatch("callback", "deleteMessage sessSwitch", deleteMessage(ctx.telegram, chatId, messageId));
   await sendMessage(ctx.telegram, chatId, text, {
     replyMarkup: sessionsReplyKeyboard(ctx.sessionsFile),
     parseMode: pages.length > 0 ? "HTML" : undefined,
@@ -336,6 +333,6 @@ async function handleSessionDeleteCallback(
     return;
   }
 
-  try { await deleteMessage(ctx.telegram, chatId, messageId); } catch { /* ignore */ }
+  silentCatch("callback", "deleteMessage sessDel", deleteMessage(ctx.telegram, chatId, messageId));
   await sendMessage(ctx.telegram, chatId, `Deleted: ${label}`, { replyMarkup: sessionsReplyKeyboard(ctx.sessionsFile) });
 }

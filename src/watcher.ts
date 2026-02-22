@@ -1,10 +1,11 @@
 import * as fs from "fs";
 import { TelegramConfig, sendMessage } from "./telegram";
 import { tryMdToHtml, truncateMessage } from "./format";
-import { extractMessageContent, UUID_RE, findSessionFilePath } from "./sessions";
+import { UUID_RE, findSessionFilePath } from "./sessions";
+import { extractMessageContent, parseJsonlLines } from "./jsonl";
 import { readKvFile, readEnvLines, writeEnvLines } from "./config";
 import { activeQueries } from "./context";
-import { logger, errorMessage } from "./logger";
+import { logger, errorMessage, silentTry } from "./logger";
 
 export function isAutoSyncEnabled(sessionsFile: string): boolean {
   const val = readKvFile(sessionsFile).REMOTECODE_AUTO_SYNC;
@@ -77,11 +78,7 @@ function processNewData(telegram: TelegramConfig, chatId: number): void {
   if (activeQueries.has(currentSessionId)) return;
   if (!isAutoSyncEnabled(state.sessionsFile!)) return;
 
-  for (const line of lines) {
-    if (!line.trim()) continue;
-    let entry: Record<string, unknown>;
-    try { entry = JSON.parse(line); } catch { continue; }
-
+  for (const entry of parseJsonlLines(lines.join("\n"), "watcher")) {
     const type = entry.type as string;
     if (type !== "assistant" && type !== "user") continue;
     if (type === "user" && entry.isMeta) continue;
@@ -193,10 +190,10 @@ export function startWatcher(telegram: TelegramConfig, sessionsFile: string): vo
 /** Advance watcher offset to end-of-file so pending debounce won't re-send SDK data */
 export function skipToEnd(): void {
   if (state.currentFilePath) {
-    try {
-      state.lastByteOffset = fs.statSync(state.currentFilePath).size;
+    silentTry("watcher", "skipToEnd stat", () => {
+      state.lastByteOffset = fs.statSync(state.currentFilePath!).size;
       state.lineBuf = "";
-    } catch { /* ignore */ }
+    });
   }
 }
 
