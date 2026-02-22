@@ -66,7 +66,7 @@ The interactive setup wizard will prompt for:
 
 1. **TELEGRAM_BOT_TOKEN** -- validated against Telegram API
 2. **REMOTECODE_ALLOWED_USERS** -- comma-separated user IDs or @usernames
-3. **REMOTECODE_YOLO** -- `Y` enables autonomous mode (Claude Code runs without permission prompts, required for full remote control). Set `N` if you prefer read-only / monitoring use, but note that any action requiring approval will block since there's no terminal to confirm
+3. **REMOTECODE_YOLO** -- `Y` enables autonomous mode (Claude Code runs without permission prompts). Set `N` to get Allow / Deny / Allow all prompts via Telegram inline buttons for each tool action
 4. **STT setup** -- optional offline voice transcription. Installs `whisper-cli` and `ffmpeg` via your system's package manager, and downloads a local Whisper model (~466 MB). Runs entirely on your machine -- no API calls, completely free
 
 Config is saved to `~/.remotecode/config`.
@@ -85,17 +85,17 @@ sequenceDiagram
     D->>D: Auth check & route
 
     alt Text message
-        D->>C: claude --resume session --print "prompt"
+        D->>C: SDK query (prompt)
     else Image
         D->>T: Download file
-        D->>C: claude --resume session --print "prompt + image"
+        D->>C: SDK query (prompt + image path)
     else Voice
         D->>T: Download audio
         D->>D: ffmpeg → whisper-cli transcription
-        D->>C: claude --resume session --print "transcription"
+        D->>C: SDK query (transcription)
     end
 
-    C-->>D: stdout response
+    C-->>D: Streaming response
     D->>D: Markdown → Telegram HTML
     D->>T: sendMessage (HTML)
     T-->>U: Formatted response
@@ -134,16 +134,26 @@ Send these as messages in your Telegram chat with the bot:
 | `/projects` | Browse sessions grouped by project directory |
 | `/new` | Start a new Claude Code session |
 | `/history` | Show conversation history of current session |
+| `/cancel` | Cancel the current task |
+| `/model` | Switch Claude model (Sonnet / Opus / Haiku) |
 | `/sync` | Toggle auto-sync notifications on/off |
 
 ### Inline Buttons
 
 After `/sessions` or `/projects`, interactive inline keyboards let you:
 
-- **Switch** to any session with one tap
+- **Switch** to any session with one tap (interrupts any running task in the old session)
 - **Create** new sessions (globally or per-project)
 - **Delete** sessions
 - **Navigate** between project views
+
+### Permission Prompts (non-YOLO)
+
+When YOLO mode is off, Claude Code tool actions trigger an inline keyboard:
+
+- **Allow** -- permit this single action
+- **Deny** -- reject and interrupt the task
+- **Allow all** -- auto-allow all actions for the rest of this session (resets on session switch)
 
 ## Message Types
 
@@ -174,7 +184,7 @@ RemoteCode discovers sessions from `~/.claude/projects/*/` by scanning `.jsonl` 
 - **Active session** is stored in `~/.remotecode/local`
 - **Session CWD** determines which directory Claude Code runs in
 - Sessions are auto-created on first message if none exists
-- The `--resume` flag is used to continue existing sessions; falls back to `--session-id` for new ones
+- **Switching sessions** while a task is running interrupts the old task immediately -- only the active session's messages are shown
 
 ### Auto-Sync
 
@@ -200,7 +210,7 @@ REMOTECODE_YOLO=true
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | Yes | Bot token from @BotFather |
 | `REMOTECODE_ALLOWED_USERS` | Yes | Comma/space-separated user IDs or @usernames |
-| `REMOTECODE_YOLO` | No | `true` for full remote control (skips Claude Code permission prompts). Set `false` for read-only / monitoring use |
+| `REMOTECODE_YOLO` | No | `true` to auto-approve all tool actions. `false` to get Allow / Deny / Allow all prompts via Telegram |
 | `REMOTECODE_VERBOSE` | No | `true` to enable DEBUG-level logging |
 
 ## Speech-to-Text (STT)
@@ -234,7 +244,7 @@ Supported package managers: Homebrew (macOS/Linux), apt (Ubuntu/Debian), dnf (Fe
 - **Repeat block** -- Unauthorized users are warned once, then silently blocked
 - **No webhook** -- Uses long polling, no public endpoints needed
 - **Local STT** -- Voice transcription runs entirely offline via whisper.cpp
-- **YOLO mode** -- Required for full remote control. Without it, any Claude Code action needing approval will hang since there's no terminal to confirm. If security is a concern, set YOLO to `false` and use RemoteCode for text conversations and monitoring only
+- **YOLO mode** -- Enables autonomous mode where all tool actions are auto-approved. When off, each action shows Allow / Deny / Allow all buttons in Telegram. "Allow all" grants session-level auto-approval that resets on session switch
 
 ## Development
 
