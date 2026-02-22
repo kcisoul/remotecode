@@ -530,8 +530,11 @@ async function executePrompt(
   } finally {
     stopTyping();
     skipToEnd();
-    activeQueries.delete(sessionId);
     suppressedSessions.delete(sessionId);
+
+    // Delay watcher guard removal to let SDK finish writing to JSONL
+    const sid = sessionId;
+    setTimeout(() => { skipToEnd(); activeQueries.delete(sid); }, 2000);
 
     // Auto-close non-active session processes when their task finishes
     const currentActiveId = getOrCreateSessionId(ctx.sessionsFile);
