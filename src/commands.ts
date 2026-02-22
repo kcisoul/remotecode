@@ -79,6 +79,7 @@ export async function handleCommand(
     await sendMessage(ctx.telegram, chatId, projDisplay.text, {
       replyToMessageId: messageId,
       parseMode: "HTML",
+      replyMarkup: { inline_keyboard: projDisplay.buttons },
     });
     return true;
   }

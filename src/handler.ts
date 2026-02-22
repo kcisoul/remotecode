@@ -19,12 +19,14 @@ import { defaultCwd, whisperModelPath, SILENT_TOOLS } from "./config";
 import {
   getOrCreateSessionId,
   loadSessionCwd,
+  loadActiveSessionId,
   loadModel,
+  createNewSession,
 } from "./sessions";
 import { sessionsReplyKeyboard } from "./session-ui";
 import { handleCommand } from "./commands";
 import { HandlerContext, isUserAllowed, activeQueries } from "./context";
-import { registerPendingAsk, registerPendingPerm, denyAllPending, hasPendingPerms, type PermMeta } from "./callbacks";
+import { registerPendingAsk, registerPendingPerm, denyAllPending, hasPendingPerms, consumePendingInput, type PermMeta } from "./callbacks";
 import { isSttReady, isMacOS, checkSttStatus } from "./stt";
 import { skipToEnd } from "./watcher";
 import { isAssistantMessage, isSystemInit, isTaskStarted, isTaskNotification, isResult, isResultError } from "./sdk-types";
@@ -298,6 +300,16 @@ async function handleTextMessage(msg: Message, ctx: HandlerContext): Promise<voi
 
   try {
     logger.debug("text", `chat_id=${chatId} message_id=${messageId} text=${text}`);
+
+    // Check pending input (e.g. new project name)
+    const pendingType = consumePendingInput(chatId);
+    if (pendingType && !text.startsWith("/")) {
+      if (pendingType === "new_project") {
+        await handleNewProject(text, chatId, messageId, ctx);
+        return;
+      }
+    }
+
     // Commands always handled immediately (regardless of busy state)
     if (await handleCommand(text, chatId, messageId, ctx)) return;
     await handlePrompt(text, chatId, messageId, ctx);
@@ -385,6 +397,73 @@ async function handleVoiceMessage(msg: Message, ctx: HandlerContext): Promise<vo
     logger.error("handler", `Error in handleVoiceMessage: ${errorMessage(err)}`, err);
     await sendMessage(ctx.telegram, chatId, `Error processing voice: ${escapeHtml(errorMessage(err))}`, { replyToMessageId: messageId });
   }
+}
+
+// ---------- new project creation ----------
+async function handleNewProject(
+  input: string,
+  chatId: number,
+  messageId: number,
+  ctx: HandlerContext,
+): Promise<void> {
+  // Validate input
+  if (!input || input.includes("..") || path.isAbsolute(input)) {
+    await sendMessage(ctx.telegram, chatId, "Invalid path.", { replyToMessageId: messageId });
+    return;
+  }
+
+  const sanitized = input.replace(/\\/g, "/").replace(/\/+/g, "/").replace(/^\/|\/$/g, "");
+  if (!sanitized) {
+    await sendMessage(ctx.telegram, chatId, "Invalid path.", { replyToMessageId: messageId });
+    return;
+  }
+
+  const fullPath = path.join(os.homedir(), sanitized);
+  const projectName = path.basename(fullPath);
+
+  // Check if final directory already exists
+  if (fs.existsSync(fullPath)) {
+    await sendMessage(ctx.telegram, chatId, `Already exists: <code>~/${escapeHtml(sanitized)}</code>`, {
+      replyToMessageId: messageId,
+      parseMode: "HTML",
+    });
+    return;
+  }
+
+  // Create parent directories if needed, then final directory
+  try {
+    const parentDir = path.dirname(fullPath);
+    fs.mkdirSync(parentDir, { recursive: true });
+    fs.mkdirSync(fullPath);
+  } catch (err) {
+    await sendMessage(ctx.telegram, chatId, `Failed to create directory: ${escapeHtml(errorMessage(err))}`, {
+      replyToMessageId: messageId,
+    });
+    return;
+  }
+
+  // Stop old session and create new one
+  const oldId = loadActiveSessionId(ctx.sessionsFile);
+  if (oldId) {
+    if (isSessionBusy(oldId)) {
+      suppressSessionMessages(oldId);
+      setSessionAutoAllow(oldId);
+      denyAllPending();
+    } else {
+      resetSessionAutoAllow(oldId);
+      denyAllPending();
+    }
+  }
+
+  createNewSession(ctx.sessionsFile, fullPath);
+  await sendMessage(ctx.telegram, chatId, `Created project: <code>~/${escapeHtml(sanitized)}</code>`, {
+    replyToMessageId: messageId,
+    parseMode: "HTML",
+    replyMarkup: sessionsReplyKeyboard(ctx.sessionsFile),
+  });
+
+  // Send "new project" prompt to Claude to initialize the session
+  await handlePrompt("new project", chatId, messageId, ctx);
 }
 
 // ---------- prompt handling ----------

@@ -31,6 +31,30 @@ import {
   sessionsReplyKeyboard,
 } from "./session-ui";
 
+// ---------- pending text input system ----------
+interface PendingInput {
+  type: "new_project";
+  timer: ReturnType<typeof setTimeout>;
+}
+
+const pendingInputs = new Map<number, PendingInput>();
+const PENDING_INPUT_TIMEOUT_MS = 120_000; // 2 minutes
+
+export function registerPendingInput(chatId: number, type: "new_project"): void {
+  const prev = pendingInputs.get(chatId);
+  if (prev) clearTimeout(prev.timer);
+  const timer = setTimeout(() => { pendingInputs.delete(chatId); }, PENDING_INPUT_TIMEOUT_MS);
+  pendingInputs.set(chatId, { type, timer });
+}
+
+export function consumePendingInput(chatId: number): PendingInput["type"] | null {
+  const pending = pendingInputs.get(chatId);
+  if (!pending) return null;
+  clearTimeout(pending.timer);
+  pendingInputs.delete(chatId);
+  return pending.type;
+}
+
 // ---------- pending ask/perm systems ----------
 const pendingAsk = new Map<string, {
   resolve: (answer: Record<string, string>) => void;
@@ -122,11 +146,15 @@ function stopOldSession(sessionsFile: string, newSessionId?: string): void {
 
 // ---------- project list display ----------
 const I = "\u00a0\u00a0\u00a0";
-export function buildProjectListDisplay(): { text: string } {
+export function buildProjectListDisplay(): { text: string; buttons: Array<Array<{ text: string; callback_data: string }>> } {
+  const buttons: Array<Array<{ text: string; callback_data: string }>> = [
+    [{ text: "+ New Project", callback_data: "proj:add" }],
+  ];
+
   const projects = discoverProjects();
 
   if (projects.length === 0) {
-    return { text: "No projects found." };
+    return { text: "No projects found.", buttons };
   }
 
   const blocks: string[] = [];
@@ -142,7 +170,7 @@ export function buildProjectListDisplay(): { text: string } {
     blocks.push(info + "\n" + cmd);
   }
 
-  return { text: blocks.join("\n\n") };
+  return { text: blocks.join("\n\n"), buttons };
 }
 
 // ---------- main callback handler ----------
@@ -265,8 +293,21 @@ async function handleProjectCallback(
   if (action === "list" || action === "back") {
     try {
       const projDisplay = buildProjectListDisplay();
-      await editMessageText(ctx.telegram, chatId, messageId, projDisplay.text, { parseMode: "HTML" });
+      await editMessageText(ctx.telegram, chatId, messageId, projDisplay.text, {
+        parseMode: "HTML",
+        replyMarkup: { inline_keyboard: projDisplay.buttons },
+      });
     } catch (err) { logger.debug("callback", `editMessageText projects: ${errorMessage(err)}`); }
+    return;
+  }
+
+  if (action === "add") {
+    registerPendingInput(chatId, "new_project");
+    silentCatch("callback", "deleteMessage proj:add", deleteMessage(ctx.telegram, chatId, messageId));
+    await sendMessage(ctx.telegram, chatId, "Enter project path (e.g. <code>myapp</code> or <code>work/myapp</code>):", {
+      parseMode: "HTML",
+      replyMarkup: { force_reply: true, selective: true },
+    });
     return;
   }
 
