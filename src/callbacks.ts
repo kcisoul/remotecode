@@ -7,6 +7,7 @@ import {
 } from "./telegram";
 import { logger, errorMessage } from "./logger";
 import { HandlerContext, isUserAllowed, activeQueries } from "./context";
+import { closeActiveQuery } from "./claude";
 import {
   loadActiveSessionId,
   saveActiveSessionId,
@@ -215,6 +216,8 @@ async function handleProjectCallback(
   if (action.startsWith("new:")) {
     const dir = action.slice("new:".length);
     const projectPath = decodeProjectPath(dir);
+    denyAllPending();
+    closeActiveQuery();
     createNewSession(ctx.sessionsFile, projectPath);
     const name = projectPath.split("/").pop() || projectPath;
     try { await deleteMessage(ctx.telegram, chatId, messageId); } catch { /* ignore */ }
@@ -275,6 +278,8 @@ async function handleSessionCallback(
   }
 
   if (action === "new") {
+    denyAllPending();
+    closeActiveQuery();
     createNewSession(ctx.sessionsFile);
     try { await deleteMessage(ctx.telegram, chatId, messageId); } catch { /* ignore */ }
     await sendMessage(ctx.telegram, chatId, "New session started.", { replyMarkup: sessionsReplyKeyboard(ctx.sessionsFile) });
@@ -287,12 +292,11 @@ async function handleSessionCallback(
     return;
   }
 
-  // Abort active query on the old session
+  // Close persistent query on the old session
+  denyAllPending();
+  closeActiveQuery();
   const oldId = loadActiveSessionId(ctx.sessionsFile);
-  if (oldId) {
-    const controller = activeQueries.get(oldId);
-    if (controller) controller.abort();
-  }
+  if (oldId) activeQueries.delete(oldId);
 
   saveActiveSessionId(ctx.sessionsFile, session.sessionId);
   saveSessionCwd(ctx.sessionsFile, session.project);

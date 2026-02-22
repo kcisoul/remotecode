@@ -19,5 +19,5 @@ export function isUserAllowed(
   return false;
 }
 
-// ---------- active query tracking ----------
-export const activeQueries = new Map<string, AbortController>();
+// ---------- active query tracking (for watcher guard) ----------
+export const activeQueries = new Set<string>();

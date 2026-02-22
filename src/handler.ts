@@ -12,7 +12,7 @@ import {
   sendChatAction,
   downloadFile,
 } from "./telegram";
-import { querySession, type SDKMessage, type CanUseToolFn } from "./claude";
+import { querySession, interruptActiveQuery, wasInterrupted, wasClosedExternally, type SDKMessage, type CanUseToolFn } from "./claude";
 import { mdToTelegramHtml, escapeHtml, tryMdToHtml, truncateMessage } from "./format";
 import { logger, errorMessage } from "./logger";
 import { defaultCwd, whisperModelPath } from "./config";
@@ -323,18 +323,15 @@ async function handlePrompt(
   const model = loadModel(ctx.sessionsFile);
   const formattedPrompt = formatPrompt(prompt, imagePaths);
 
-  // Abort any existing query for this session (e.g. waiting for perm)
-  const existingController = activeQueries.get(sessionId);
-  if (existingController) {
-    denyAllPending();
-    existingController.abort();
-  }
+  // Interrupt any active turn & deny pending permissions
+  denyAllPending();
+  interruptActiveQuery();
 
-  const controller = new AbortController();
-  activeQueries.set(sessionId, controller);
+  activeQueries.add(sessionId);
   const stopTyping = startTyping(ctx.telegram, chatId);
 
   const textParts: string[] = [];
+  let gotResult = false;
 
   try {
     for await (const msg of querySession(formattedPrompt, {
@@ -342,7 +339,6 @@ async function handlePrompt(
       cwd,
       yolo: ctx.yolo,
       model,
-      abortController: controller,
       canUseTool: buildCanUseTool(ctx, chatId, messageId),
     })) {
       // Log init (session ID already set via getOrCreateSessionId)
@@ -388,12 +384,18 @@ async function handlePrompt(
 
       // Handle result
       if (msg.type === "result") {
+        gotResult = true;
         const resultMsg = msg as SDKMessage & { is_error: boolean; errors?: string[]; total_cost_usd?: number; num_turns?: number };
-        if (resultMsg.is_error && resultMsg.errors) {
+        if (resultMsg.is_error && resultMsg.errors && !wasInterrupted()) {
           const errText = resultMsg.errors.join("\n");
           await sendMessage(ctx.telegram, chatId, `Error: ${errText}`, { replyToMessageId: messageId });
         }
       }
+    }
+
+    // If query was closed externally (session switch), don't send text
+    if (!gotResult || wasClosedExternally()) {
+      return;
     }
 
     // Send collected text response
@@ -417,15 +419,6 @@ async function handlePrompt(
         });
       }
     }
-  } catch (err) {
-    if (controller.signal.aborted) {
-      logger.debug("handler", `query aborted for session ${sessionId.slice(0, 8)}`);
-      await sendMessage(ctx.telegram, chatId, "Session switched — request cancelled.", {
-        replyToMessageId: messageId,
-      });
-      return;
-    }
-    throw err;
   } finally {
     stopTyping();
     activeQueries.delete(sessionId);
