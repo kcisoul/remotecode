@@ -1,4 +1,5 @@
 import {
+  TelegramConfig,
   CallbackQuery,
   sendMessage,
   deleteMessage,
@@ -66,10 +67,17 @@ export interface PermMeta {
   toolName: string;
 }
 
+export interface PermMsgInfo {
+  telegram: TelegramConfig;
+  chatId: number;
+  sentMessageId: number;
+}
+
 const pendingPerm = new Map<string, {
   resolve: (decision: "allow" | "deny" | "allowall") => void;
   timer: ReturnType<typeof setTimeout>;
   meta: PermMeta;
+  msgInfo?: PermMsgInfo;
 }>();
 
 const PENDING_TIMEOUT_MS = 300_000; // 5 minutes
@@ -84,13 +92,13 @@ export function registerPendingAsk(id: string): Promise<Record<string, string>> 
   });
 }
 
-export function registerPendingPerm(id: string, meta: PermMeta): Promise<"allow" | "deny" | "allowall"> {
+export function registerPendingPerm(id: string, meta: PermMeta, msgInfo?: PermMsgInfo): Promise<"allow" | "deny" | "allowall"> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       pendingPerm.delete(id);
       reject(new Error("Timeout waiting for permission response"));
     }, PENDING_TIMEOUT_MS);
-    pendingPerm.set(id, { resolve, timer, meta });
+    pendingPerm.set(id, { resolve, timer, meta, msgInfo });
   });
 }
 
@@ -98,6 +106,11 @@ export function denyAllPending(): void {
   for (const [, pending] of pendingPerm) {
     clearTimeout(pending.timer);
     pending.resolve("deny");
+    permDenied.add(pending.meta.sessionId);
+    if (pending.msgInfo) {
+      silentCatch("callback", "editPermDenied",
+        editMessageText(pending.msgInfo.telegram, pending.msgInfo.chatId, pending.msgInfo.sentMessageId, "Cancelled"));
+    }
   }
   pendingPerm.clear();
   for (const [, pending] of pendingAsk) {
@@ -111,6 +124,10 @@ export function allowAllPending(): void {
   for (const [, pending] of pendingPerm) {
     clearTimeout(pending.timer);
     pending.resolve("allow");
+    if (pending.msgInfo) {
+      silentCatch("callback", "editPermAllowed",
+        editMessageText(pending.msgInfo.telegram, pending.msgInfo.chatId, pending.msgInfo.sentMessageId, "Allowed"));
+    }
   }
   pendingPerm.clear();
   for (const [, pending] of pendingAsk) {
@@ -122,6 +139,17 @@ export function allowAllPending(): void {
 
 export function hasPendingPerms(): boolean {
   return pendingPerm.size > 0;
+}
+
+// ---------- per-session perm-denied flag (prevents queued canUseTool from showing dialogs after deny) ----------
+const permDenied = new Set<string>();
+
+export function isPermDenied(sessionId: string): boolean {
+  return permDenied.has(sessionId);
+}
+
+export function clearPermDenied(sessionId: string): void {
+  permDenied.delete(sessionId);
 }
 
 // ---------- stop old session on switch ----------

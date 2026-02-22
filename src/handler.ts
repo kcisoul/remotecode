@@ -26,7 +26,7 @@ import {
 import { sessionsReplyKeyboard } from "./session-ui";
 import { handleCommand } from "./commands";
 import { HandlerContext, isUserAllowed, activeQueries } from "./context";
-import { registerPendingAsk, registerPendingPerm, denyAllPending, hasPendingPerms, consumePendingInput, type PermMeta } from "./callbacks";
+import { registerPendingAsk, registerPendingPerm, denyAllPending, hasPendingPerms, consumePendingInput, isPermDenied, clearPermDenied, type PermMeta } from "./callbacks";
 import { isSttReady, isMacOS, checkSttStatus } from "./stt";
 import { skipToEnd } from "./watcher";
 import { isAssistantMessage, isSystemInit, isTaskStarted, isTaskNotification, isResult, isResultError } from "./sdk-types";
@@ -209,6 +209,9 @@ function formatToolDescription(toolName: string, input: Record<string, unknown>)
 
 // ---------- canUseTool callback builder ----------
 function buildCanUseTool(ctx: HandlerContext, chatId: number, messageId: number, sessionId: string): CanUseToolFn {
+  // Serialize permission dialogs so only one is shown at a time
+  let permGate: Promise<void> = Promise.resolve();
+
   return async (toolName, input, { decisionReason }) => {
     // 1) AskUserQuestion → inline keyboard with options
     if (toolName === "AskUserQuestion") {
@@ -243,31 +246,48 @@ function buildCanUseTool(ctx: HandlerContext, chatId: number, messageId: number,
       return { behavior: "allow" as const, updatedInput: input };
     }
 
-    // 4) Non-yolo → Allow/Deny/Allow tool/Yolo inline keyboard
-    const permId = crypto.randomUUID().slice(0, 8);
-    const reason = decisionReason ? `<i>${escapeHtml(decisionReason)}</i>` : "Allow?";
-    const buttons = [
-      [
-        { text: "Allow", callback_data: `perm:${permId}:allow` },
-        { text: "Deny", callback_data: `perm:${permId}:deny` },
-      ],
-      [
-        { text: `Allow ${toolName} for session`, callback_data: `perm:${permId}:tool` },
-      ],
-      [
-        { text: "Yolo for session", callback_data: `perm:${permId}:yolo` },
-      ],
-    ];
-    await sendMessage(ctx.telegram, chatId, reason, {
-      replyToMessageId: messageId,
-      parseMode: "HTML",
-      replyMarkup: { inline_keyboard: buttons },
-    });
-    const result = await registerPendingPerm(permId, { sessionId, toolName });
-    if (result === "allow" || result === "allowall") {
-      return { behavior: "allow" as const, updatedInput: input };
+    // 4) Non-yolo → serialize, then show Allow/Deny inline keyboard
+    const prevGate = permGate;
+    let releaseGate!: () => void;
+    permGate = new Promise<void>(r => { releaseGate = r; });
+
+    try {
+      await prevGate;
+
+      // Session was interrupted while waiting in queue → skip dialog
+      if (isPermDenied(sessionId)) {
+        return { behavior: "deny" as const, message: "Session interrupted", interrupt: true };
+      }
+
+      const permId = crypto.randomUUID().slice(0, 8);
+      const reason = decisionReason ? `<i>${escapeHtml(decisionReason)}</i>` : "Allow?";
+      const buttons = [
+        [
+          { text: "Allow", callback_data: `perm:${permId}:allow` },
+          { text: "Deny", callback_data: `perm:${permId}:deny` },
+        ],
+        [
+          { text: `Allow ${toolName} for session`, callback_data: `perm:${permId}:tool` },
+        ],
+        [
+          { text: "Yolo for session", callback_data: `perm:${permId}:yolo` },
+        ],
+      ];
+      const sentMsgId = await sendMessage(ctx.telegram, chatId, reason, {
+        replyToMessageId: messageId,
+        parseMode: "HTML",
+        replyMarkup: { inline_keyboard: buttons },
+      });
+      const result = await registerPendingPerm(permId, { sessionId, toolName }, {
+        telegram: ctx.telegram, chatId, sentMessageId: sentMsgId,
+      });
+      if (result === "allow" || result === "allowall") {
+        return { behavior: "allow" as const, updatedInput: input };
+      }
+      return { behavior: "deny" as const, message: "User denied", interrupt: true };
+    } finally {
+      releaseGate();
     }
-    return { behavior: "deny" as const, message: "User denied", interrupt: true };
   };
 }
 
@@ -621,6 +641,7 @@ async function executePrompt(
     queryCleanupTimeouts.delete(sessionId);
   }
 
+  clearPermDenied(sessionId);
   processingTurns.add(sessionId);
   activeQueries.add(sessionId);
   const stopTyping = startTyping(ctx.telegram, chatId);
