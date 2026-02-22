@@ -1,6 +1,6 @@
 {
   "name": "@kcisoul/remotecode",
-  "version": "0.9.5",
+  "version": "0.9.6",
   "description": "Telegram bot for Claude Code via long polling",
   "author": "kcisoul",
   "homepage": "https://github.com/kcisoul/remotecode#readme",
