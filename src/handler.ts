@@ -131,6 +131,17 @@ export function setSessionAutoAllow(sessionId: string): void {
   sessionAutoAllowMap.set(sessionId, true);
 }
 
+// ---------- session message suppression (for session switch) ----------
+const suppressedSessions = new Set<string>();
+
+export function suppressSessionMessages(sessionId: string): void {
+  suppressedSessions.add(sessionId);
+}
+
+export function unsuppressSessionMessages(sessionId: string): void {
+  suppressedSessions.delete(sessionId);
+}
+
 // ---------- message queue ----------
 interface QueuedMessage {
   prompt: string;
@@ -410,6 +421,9 @@ async function streamResponse(
     model: options.model,
     canUseTool: buildCanUseTool(ctx, chatId, messageId, sessionId),
   })) {
+    // Skip sending messages if session was switched away
+    const suppressed = suppressedSessions.has(sessionId);
+
     if (isSystemInit(msg)) {
       logger.debug("handler", `session init: ${msg.session_id?.slice(0, 8)}`);
     }
@@ -419,7 +433,7 @@ async function streamResponse(
         if (block.type === "text" && "text" in block) {
           textParts.push(block.text);
         }
-        if (block.type === "tool_use" && "name" in block && !SILENT_TOOLS.has(block.name)) {
+        if (!suppressed && block.type === "tool_use" && "name" in block && !SILENT_TOOLS.has(block.name)) {
           const desc = formatToolDescription(block.name, (block as { input?: Record<string, unknown> }).input || {});
           await sendMessage(ctx.telegram, chatId, desc, {
             replyToMessageId: messageId,
@@ -429,13 +443,13 @@ async function streamResponse(
       }
     }
 
-    if (isTaskStarted(msg) && msg.description) {
+    if (!suppressed && isTaskStarted(msg) && msg.description) {
       await sendMessage(ctx.telegram, chatId, `<b>Agent:</b> ${escapeHtml(msg.description)}`, {
         replyToMessageId: messageId,
         parseMode: "HTML",
       });
     }
-    if (isTaskNotification(msg) && msg.summary) {
+    if (!suppressed && isTaskNotification(msg) && msg.summary) {
       const status = msg.status || "done";
       await sendMessage(ctx.telegram, chatId, `<b>Agent ${escapeHtml(status)}:</b> ${escapeHtml(msg.summary)}`, {
         replyToMessageId: messageId,
@@ -445,7 +459,7 @@ async function streamResponse(
 
     if (isResult(msg)) {
       gotResult = true;
-      if (isResultError(msg) && msg.errors && !wasSessionInterrupted(sessionId)) {
+      if (!suppressed && isResultError(msg) && msg.errors && !wasSessionInterrupted(sessionId)) {
         const errText = msg.errors.join("\n");
         await sendMessage(ctx.telegram, chatId, `Error: ${escapeHtml(errText)}`, { replyToMessageId: messageId });
       }
@@ -508,11 +522,16 @@ async function executePrompt(
     );
 
     if (!gotResult) return;
-    await sendFinalResponse(textParts, prompt, chatId, messageId, ctx, voiceMode);
+
+    // Don't send final response if session was switched away
+    if (!suppressedSessions.has(sessionId)) {
+      await sendFinalResponse(textParts, prompt, chatId, messageId, ctx, voiceMode);
+    }
   } finally {
     stopTyping();
     skipToEnd();
     activeQueries.delete(sessionId);
+    suppressedSessions.delete(sessionId);
 
     // Auto-close non-active session processes when their task finishes
     const currentActiveId = getOrCreateSessionId(ctx.sessionsFile);

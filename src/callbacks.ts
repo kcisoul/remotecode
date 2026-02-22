@@ -8,7 +8,7 @@ import {
 import { logger, errorMessage, silentCatch } from "./logger";
 import { escapeHtml } from "./format";
 import { HandlerContext, isUserAllowed } from "./context";
-import { setSessionAutoAllow } from "./handler";
+import { setSessionAutoAllow, resetSessionAutoAllow, isSessionBusy, suppressSessionMessages, unsuppressSessionMessages } from "./handler";
 import {
   loadActiveSessionId,
   saveActiveSessionId,
@@ -65,12 +65,25 @@ export function registerPendingPerm(id: string): Promise<"allow" | "deny" | "all
 }
 
 export function denyAllPending(): void {
-  for (const [id, pending] of pendingPerm) {
+  for (const [, pending] of pendingPerm) {
     clearTimeout(pending.timer);
     pending.resolve("deny");
   }
   pendingPerm.clear();
-  for (const [id, pending] of pendingAsk) {
+  for (const [, pending] of pendingAsk) {
+    clearTimeout(pending.timer);
+    pending.resolve({ answer: "" });
+  }
+  pendingAsk.clear();
+}
+
+export function allowAllPending(): void {
+  for (const [, pending] of pendingPerm) {
+    clearTimeout(pending.timer);
+    pending.resolve("allow");
+  }
+  pendingPerm.clear();
+  for (const [, pending] of pendingAsk) {
     clearTimeout(pending.timer);
     pending.resolve({ answer: "" });
   }
@@ -79,6 +92,26 @@ export function denyAllPending(): void {
 
 export function hasPendingPerms(): boolean {
   return pendingPerm.size > 0;
+}
+
+// ---------- stop old session on switch ----------
+function stopOldSession(sessionsFile: string, newSessionId?: string): void {
+  const oldId = loadActiveSessionId(sessionsFile);
+  if (oldId && oldId !== newSessionId) {
+    if (isSessionBusy(oldId)) {
+      // Keep work running, just suppress messages and auto-allow permissions
+      suppressSessionMessages(oldId);
+      setSessionAutoAllow(oldId);
+      allowAllPending();
+    } else {
+      resetSessionAutoAllow(oldId);
+      denyAllPending();
+    }
+  }
+  // Unsuppress new session in case it was running in background
+  if (newSessionId) {
+    unsuppressSessionMessages(newSessionId);
+  }
 }
 
 // ---------- project list markup ----------
@@ -221,7 +254,7 @@ async function handleProjectCallback(
   if (action.startsWith("new:")) {
     const dir = action.slice("new:".length);
     const projectPath = decodeProjectPath(dir);
-    denyAllPending();
+    stopOldSession(ctx.sessionsFile);
     createNewSession(ctx.sessionsFile, projectPath);
     const name = projectPath.split("/").pop() || projectPath;
     silentCatch("callback", "deleteMessage proj:new", deleteMessage(ctx.telegram, chatId, messageId));
@@ -282,7 +315,7 @@ async function handleSessionCallback(
   }
 
   if (action === "new") {
-    denyAllPending();
+    stopOldSession(ctx.sessionsFile);
     createNewSession(ctx.sessionsFile);
     silentCatch("callback", "deleteMessage sess:new", deleteMessage(ctx.telegram, chatId, messageId));
     await sendMessage(ctx.telegram, chatId, "New session started.", { replyMarkup: sessionsReplyKeyboard(ctx.sessionsFile) });
@@ -295,8 +328,8 @@ async function handleSessionCallback(
     return;
   }
 
-  // Deny pending prompts (old session continues in background)
-  denyAllPending();
+  // Stop old session's streaming and switch
+  stopOldSession(ctx.sessionsFile, session.sessionId);
 
   saveActiveSessionId(ctx.sessionsFile, session.sessionId);
   saveSessionCwd(ctx.sessionsFile, session.project);

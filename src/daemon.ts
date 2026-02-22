@@ -130,6 +130,8 @@ async function registerCommands(config: TelegramConfig): Promise<void> {
     { command: "projects", description: "Browse sessions by project" },
     { command: "new", description: "New Claude session" },
     { command: "history", description: "Show last 10 turns of current session" },
+    { command: "cancel", description: "Cancel the current task" },
+    { command: "model", description: "Switch Claude model" },
     { command: "sync", description: "Toggle auto-sync notifications" },
   ];
   await setMyCommands(config, commands);
