@@ -49,6 +49,45 @@ describe("mdToTelegramHtml", () => {
     const result = mdToTelegramHtml("```\n<div>hi</div>\n```");
     expect(result).toContain("&lt;div&gt;hi&lt;/div&gt;");
   });
+
+  it("converts markdown table to box-drawing in <pre>", () => {
+    const table = [
+      "| Command | Description |",
+      "|---|---|",
+      "| /cancel | Cancel task |",
+      "| /model | Switch model |",
+    ].join("\n");
+    const result = mdToTelegramHtml(table);
+    expect(result).toContain("<pre>");
+    expect(result).toContain("┌");
+    expect(result).toContain("│ Command");
+    expect(result).toContain("│ /cancel");
+    expect(result).toContain("│ /model");
+    expect(result).toContain("└");
+  });
+
+  it("converts table with surrounding text", () => {
+    const md = "Here is a table:\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\nDone.";
+    const result = mdToTelegramHtml(md);
+    expect(result).toContain("Here is a table:");
+    expect(result).toContain("<pre>");
+    expect(result).toContain("│ A │ B │");
+    expect(result).toContain("│ 1 │ 2 │");
+    expect(result).toContain("Done.");
+  });
+
+  it("pads columns to equal width", () => {
+    const table = "| A | Long Header |\n|---|---|\n| short | x |";
+    const result = mdToTelegramHtml(table);
+    // "Long Header" is 11 chars, "x" should be padded
+    expect(result).toContain("Long Header");
+    expect(result).toContain("x ");
+  });
+
+  it("leaves non-table pipe text alone", () => {
+    const result = mdToTelegramHtml("a | b | c");
+    expect(result).toBe("a | b | c");
+  });
 });
 
 describe("tryMdToHtml", () => {

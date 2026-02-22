@@ -142,7 +142,7 @@ Send these as messages in your Telegram chat with the bot:
 
 After `/sessions` or `/projects`, interactive inline keyboards let you:
 
-- **Switch** to any session with one tap (interrupts any running task in the old session)
+- **Switch** to any session with one tap (old task continues silently in background)
 - **Create** new sessions (globally or per-project)
 - **Delete** sessions
 - **Navigate** between project views
@@ -184,7 +184,7 @@ RemoteCode discovers sessions from `~/.claude/projects/*/` by scanning `.jsonl` 
 - **Active session** is stored in `~/.remotecode/local`
 - **Session CWD** determines which directory Claude Code runs in
 - Sessions are auto-created on first message if none exists
-- **Switching sessions** while a task is running interrupts the old task immediately -- only the active session's messages are shown
+- **Switching sessions** while a task is running keeps the old task working silently in the background -- only the active session's messages are shown. Use `/cancel` to stop a task
 
 ### Auto-Sync
 
