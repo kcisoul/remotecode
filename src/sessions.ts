@@ -37,9 +37,45 @@ export interface ProjectInfo {
 export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export function decodeProjectPath(encodedDir: string): string {
-  // Claude Code encodes: / -> -, and strips leading . from hidden dirs
-  // So /path/.hidden/foo -> -path--hidden-foo (-- means /.)
-  return "/" + encodedDir.replace(/^-/, "").replace(/--/g, "/.").replace(/-/g, "/");
+  // Claude Code encodes: / -> -, _ -> -, leading . stripped (-- means /.)
+  // Since both / and _ map to -, we resolve ambiguity by checking the filesystem.
+
+  // Split on -- first (hidden dir boundary: /. ), then split each part on -
+  const raw = encodedDir.replace(/^-/, "");
+  const hiddenParts = raw.split("--");
+  const segments: string[] = [];
+
+  for (let h = 0; h < hiddenParts.length; h++) {
+    const segs = hiddenParts[h].split("-").filter(Boolean);
+    if (h > 0 && segs.length > 0) {
+      // -- means /. so prepend . to the first segment after --
+      segs[0] = "." + segs[0];
+    }
+    segments.push(...segs);
+  }
+
+  return resolvePathSegments("/", segments);
+}
+
+function resolvePathSegments(base: string, segments: string[]): string {
+  if (segments.length === 0) return base;
+
+  // Try greedily joining segments with _ and check filesystem
+  for (let take = segments.length; take >= 1; take--) {
+    const candidate = segments.slice(0, take).join("_");
+    const full = path.join(base, candidate);
+    if (fs.existsSync(full)) {
+      if (take === segments.length) return full;
+      return resolvePathSegments(full, segments.slice(take));
+    }
+  }
+
+  // Fallback: treat first segment as a directory (original / encoding)
+  const first = segments[0];
+  const rest = segments.slice(1);
+  const fallback = path.join(base, first);
+  if (rest.length === 0) return fallback;
+  return resolvePathSegments(fallback, rest);
 }
 
 function projectDisplayName(encodedDir: string): string {
@@ -261,6 +297,18 @@ export function discoverProjects(): ProjectInfo[] {
 
   results.sort((a, b) => b.lastModified - a.lastModified);
   return results;
+}
+
+// ---------- model preference ----------
+export function loadModel(sessionsFile: string): string | undefined {
+  return readKvFile(sessionsFile).REMOTECODE_MODEL || undefined;
+}
+
+export function saveModel(sessionsFile: string, model: string): void {
+  let lines = readEnvLines(sessionsFile);
+  lines = lines.filter((l) => !l.trim().startsWith("REMOTECODE_MODEL="));
+  lines.push(`REMOTECODE_MODEL=${model}`);
+  writeEnvLines(sessionsFile, lines);
 }
 
 // ---------- find / delete ----------

@@ -3,7 +3,7 @@ import { TelegramConfig, sendMessage } from "./telegram";
 import { tryMdToHtml, truncateMessage } from "./format";
 import { extractMessageContent, UUID_RE, findSessionFilePath } from "./sessions";
 import { readKvFile, readEnvLines, writeEnvLines } from "./config";
-import { activeCalls } from "./context";
+import { activeQueries } from "./context";
 import { logger, errorMessage } from "./logger";
 
 export function isAutoSyncEnabled(sessionsFile: string): boolean {
@@ -74,7 +74,7 @@ function processNewData(telegram: TelegramConfig, chatId: number): void {
   // Keep the last incomplete line in the buffer
   state.lineBuf = lines.pop() || "";
 
-  if (activeCalls.has(currentSessionId)) return;
+  if (activeQueries.has(currentSessionId)) return;
   if (!isAutoSyncEnabled(state.sessionsFile!)) return;
 
   for (const line of lines) {

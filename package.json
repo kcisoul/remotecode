@@ -31,6 +31,7 @@
   ],
   "license": "MIT",
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.50",
     "@inquirer/prompts": "^8.2.0",
     "axios": "^1.7.0",
     "uuid": "^11.1.0"

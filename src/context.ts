@@ -19,16 +19,5 @@ export function isUserAllowed(
   return false;
 }
 
-// ---------- session locks ----------
-const sessionLocks = new Map<string, Promise<void>>();
-export const activeCalls = new Set<string>();
-
-export function withSessionLock<T>(lockId: string, fn: () => Promise<T>): Promise<T> {
-  const prev = sessionLocks.get(lockId) || Promise.resolve();
-  const next = prev.then(
-    () => { activeCalls.add(lockId); return fn(); },
-    () => { activeCalls.add(lockId); return fn(); },
-  ).finally(() => { activeCalls.delete(lockId); });
-  sessionLocks.set(lockId, next.then(() => {}, () => {}));
-  return next;
-}
+// ---------- active query tracking ----------
+export const activeQueries = new Map<string, AbortController>();

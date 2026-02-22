@@ -1,3 +1,4 @@
+import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
@@ -11,17 +12,19 @@ import {
   sendChatAction,
   downloadFile,
 } from "./telegram";
-import { askClaude } from "./claude";
-import { mdToTelegramHtml, tryMdToHtml, truncateMessage } from "./format";
+import { querySession, type SDKMessage, type CanUseToolFn } from "./claude";
+import { mdToTelegramHtml, escapeHtml, tryMdToHtml, truncateMessage } from "./format";
 import { logger, errorMessage } from "./logger";
 import { defaultCwd, whisperModelPath } from "./config";
 import {
   getOrCreateSessionId,
   loadSessionCwd,
+  loadModel,
 } from "./sessions";
 import { sessionsReplyKeyboard } from "./session-ui";
 import { handleCommand } from "./commands";
-import { HandlerContext, isUserAllowed, withSessionLock } from "./context";
+import { HandlerContext, isUserAllowed, activeQueries } from "./context";
+import { registerPendingAsk, registerPendingPerm, denyAllPending } from "./callbacks";
 import { isSttReady, isMacOS, checkSttStatus } from "./stt";
 
 // ---------- unauthorized tracking ----------
@@ -106,6 +109,80 @@ function startTyping(config: TelegramConfig, chatId: number): () => void {
     sendChatAction(config, chatId).catch(() => {});
   }, 4000);
   return () => clearInterval(interval);
+}
+
+// ---------- tool description formatting ----------
+function formatToolDescription(toolName: string, input: Record<string, unknown>): string {
+  const e = escapeHtml;
+  switch (toolName) {
+    case "Bash":
+      return `<b>Bash:</b> <code>${e(String(input.command || "").slice(0, 200))}</code>`;
+    case "Edit":
+      return `<b>Edit:</b> <code>${e(String(input.file_path || ""))}</code>`;
+    case "Write":
+      return `<b>Write:</b> <code>${e(String(input.file_path || ""))}</code>`;
+    case "Read":
+      return `<b>Read:</b> <code>${e(String(input.file_path || ""))}</code>`;
+    case "Glob":
+      return `<b>Glob:</b> <code>${e(String(input.pattern || ""))}</code>`;
+    case "Grep":
+      return `<b>Grep:</b> <code>${e(String(input.pattern || ""))}</code>`;
+    case "Task":
+      return `<b>Task:</b> ${e(String(input.description || ""))}`;
+    default:
+      return `<b>${e(toolName)}</b>`;
+  }
+}
+
+// ---------- canUseTool callback builder ----------
+function buildCanUseTool(ctx: HandlerContext, chatId: number, messageId: number): CanUseToolFn {
+  return async (toolName, input, { decisionReason }) => {
+    // 1) AskUserQuestion → inline keyboard with options
+    if (toolName === "AskUserQuestion") {
+      const questions = input.questions as Array<{
+        question: string;
+        options: Array<{ label: string; description?: string }>;
+      }> | undefined;
+      const q = questions?.[0];
+      if (q) {
+        const askId = crypto.randomUUID().slice(0, 8);
+        const buttons = q.options.map((opt, i) => [{
+          text: opt.label,
+          callback_data: `ask:${askId}:${i}:${opt.label}`,
+        }]);
+        await sendMessage(ctx.telegram, chatId, q.question, {
+          replyToMessageId: messageId,
+          replyMarkup: { inline_keyboard: buttons },
+        });
+        const answer = await registerPendingAsk(askId);
+        return { behavior: "allow" as const, updatedInput: { ...input, answers: answer } };
+      }
+    }
+
+    // 2) Yolo mode → auto-allow everything
+    if (ctx.yolo) {
+      return { behavior: "allow" as const, updatedInput: input };
+    }
+
+    // 3) Non-yolo → Allow/Deny inline keyboard
+    const permId = crypto.randomUUID().slice(0, 8);
+    const desc = formatToolDescription(toolName, input);
+    const reason = decisionReason ? `\n<i>${escapeHtml(decisionReason)}</i>` : "";
+    const buttons = [[
+      { text: "Allow", callback_data: `perm:${permId}:allow` },
+      { text: "Deny", callback_data: `perm:${permId}:deny` },
+    ]];
+    await sendMessage(ctx.telegram, chatId, `${desc}${reason}`, {
+      replyToMessageId: messageId,
+      parseMode: "HTML",
+      replyMarkup: { inline_keyboard: buttons },
+    });
+    const result = await registerPendingPerm(permId);
+    if (result === "allow") {
+      return { behavior: "allow" as const, updatedInput: input };
+    }
+    return { behavior: "deny" as const, message: "User denied", interrupt: true };
+  };
 }
 
 // ---------- main handler ----------
@@ -236,46 +313,121 @@ async function handlePrompt(
 ): Promise<void> {
   const sessionId = getOrCreateSessionId(ctx.sessionsFile);
   const sessionCwd = loadSessionCwd(ctx.sessionsFile);
+  const cwd = sessionCwd || defaultCwd();
+  if (!fs.existsSync(cwd)) {
+    await sendMessage(ctx.telegram, chatId, `Working directory not found: ${cwd}\nSwitch session or set a valid project path.`, {
+      replyToMessageId: messageId,
+    });
+    return;
+  }
+  const model = loadModel(ctx.sessionsFile);
   const formattedPrompt = formatPrompt(prompt, imagePaths);
 
-  const stopTyping = startTyping(ctx.telegram, chatId);
-  let busyNotified = false;
-  let answer: string;
-  try {
-    answer = await withSessionLock(sessionId, async () => {
-      return askClaude(formattedPrompt, sessionId, {
-        imagePaths,
-        cwd: sessionCwd || defaultCwd(),
-        yolo: ctx.yolo,
-        onBusy: async () => {
-          if (!busyNotified) {
-            busyNotified = true;
-            await sendMessage(ctx.telegram, chatId, "Session busy \u2014 Claude Code is active on host. Retrying...", { replyToMessageId: messageId });
-          }
-        },
-      });
-    });
-  } finally {
-    stopTyping();
+  // Abort any existing query for this session (e.g. waiting for perm)
+  const existingController = activeQueries.get(sessionId);
+  if (existingController) {
+    denyAllPending();
+    existingController.abort();
   }
 
-  const cleaned = answer.trim().replace(/<thinking>[\s\S]*?<\/thinking>\s*/g, "").trim();
+  const controller = new AbortController();
+  activeQueries.set(sessionId, controller);
+  const stopTyping = startTyping(ctx.telegram, chatId);
 
-  if (voiceMode) {
-    const userHtml = mdToTelegramHtml(prompt);
-    const botHtml = mdToTelegramHtml(truncateMessage(cleaned, 3200));
-    const formatted = `<blockquote><b><code>You:</code></b>\n${userHtml}\n\n<b><code>Bot:</code></b>\n${botHtml}</blockquote>`;
-    await sendMessage(ctx.telegram, chatId, formatted, {
-      replyToMessageId: messageId,
-      replyMarkup: sessionsReplyKeyboard(ctx.sessionsFile),
-      parseMode: "HTML",
-    });
-  } else {
-    const formatted = tryMdToHtml(cleaned);
-    await sendMessage(ctx.telegram, chatId, formatted.text, {
-      replyToMessageId: messageId,
-      replyMarkup: sessionsReplyKeyboard(ctx.sessionsFile),
-      parseMode: formatted.parseMode,
-    });
+  const textParts: string[] = [];
+
+  try {
+    for await (const msg of querySession(formattedPrompt, {
+      sessionId,
+      cwd,
+      yolo: ctx.yolo,
+      model,
+      abortController: controller,
+      canUseTool: buildCanUseTool(ctx, chatId, messageId),
+    })) {
+      // Log init (session ID already set via getOrCreateSessionId)
+      if (msg.type === "system" && msg.subtype === "init") {
+        const initMsg = msg as SDKMessage & { session_id: string };
+        logger.debug("handler", `session init: ${initMsg.session_id?.slice(0, 8)}`);
+      }
+
+      // Stream assistant messages
+      if (msg.type === "assistant") {
+        const assistantMsg = msg as SDKMessage & { message: { content: Array<{ type: string; text?: string; name?: string; input?: Record<string, unknown> }> } };
+        for (const block of assistantMsg.message.content) {
+          if (block.type === "text" && block.text) {
+            textParts.push(block.text);
+          }
+          if (block.type === "tool_use" && block.name) {
+            const desc = formatToolDescription(block.name, block.input || {});
+            await sendMessage(ctx.telegram, chatId, desc, {
+              replyToMessageId: messageId,
+              parseMode: "HTML",
+            });
+          }
+        }
+      }
+
+      // Subagent events
+      if (msg.type === "system") {
+        const sysMsg = msg as SDKMessage & { subtype: string; description?: string; status?: string; summary?: string; task_id?: string };
+        if (sysMsg.subtype === "task_started" && sysMsg.description) {
+          await sendMessage(ctx.telegram, chatId, `<b>Agent:</b> ${escapeHtml(sysMsg.description)}`, {
+            replyToMessageId: messageId,
+            parseMode: "HTML",
+          });
+        }
+        if (sysMsg.subtype === "task_notification" && sysMsg.summary) {
+          const status = sysMsg.status || "done";
+          await sendMessage(ctx.telegram, chatId, `<b>Agent ${escapeHtml(status)}:</b> ${escapeHtml(sysMsg.summary)}`, {
+            replyToMessageId: messageId,
+            parseMode: "HTML",
+          });
+        }
+      }
+
+      // Handle result
+      if (msg.type === "result") {
+        const resultMsg = msg as SDKMessage & { is_error: boolean; errors?: string[]; total_cost_usd?: number; num_turns?: number };
+        if (resultMsg.is_error && resultMsg.errors) {
+          const errText = resultMsg.errors.join("\n");
+          await sendMessage(ctx.telegram, chatId, `Error: ${errText}`, { replyToMessageId: messageId });
+        }
+      }
+    }
+
+    // Send collected text response
+    const fullText = textParts.join("\n").trim().replace(/<thinking>[\s\S]*?<\/thinking>\s*/g, "").trim();
+    if (fullText) {
+      if (voiceMode) {
+        const userHtml = mdToTelegramHtml(prompt);
+        const botHtml = mdToTelegramHtml(truncateMessage(fullText, 3200));
+        const formatted = `<blockquote><b><code>You:</code></b>\n${userHtml}\n\n<b><code>Bot:</code></b>\n${botHtml}</blockquote>`;
+        await sendMessage(ctx.telegram, chatId, formatted, {
+          replyToMessageId: messageId,
+          replyMarkup: sessionsReplyKeyboard(ctx.sessionsFile),
+          parseMode: "HTML",
+        });
+      } else {
+        const formatted = tryMdToHtml(fullText);
+        await sendMessage(ctx.telegram, chatId, formatted.text, {
+          replyToMessageId: messageId,
+          replyMarkup: sessionsReplyKeyboard(ctx.sessionsFile),
+          parseMode: formatted.parseMode,
+        });
+      }
+    }
+  } catch (err) {
+    if (controller.signal.aborted) {
+      logger.debug("handler", `query aborted for session ${sessionId.slice(0, 8)}`);
+      await sendMessage(ctx.telegram, chatId, "Session switched — request cancelled.", {
+        replyToMessageId: messageId,
+      });
+      return;
+    }
+    throw err;
+  } finally {
+    stopTyping();
+    activeQueries.delete(sessionId);
   }
 }

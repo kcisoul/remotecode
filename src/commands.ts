@@ -6,6 +6,8 @@ import {
   discoverSessions,
   findSession,
   createNewSession,
+  saveModel,
+  loadModel,
 } from "./sessions";
 import {
   formatSessionLabel,
@@ -39,6 +41,7 @@ export async function handleCommand(
       "/projects - Browse sessions by project",
       "/new - Start a new session",
       "/history - Show conversation history",
+      "/model - Switch Claude model",
       "/sync - Toggle auto-sync notifications",
     ].join("\n");
     // Send reply keyboard first, then inline keyboard buttons
@@ -113,6 +116,28 @@ export async function handleCommand(
       replyToMessageId: messageId,
       replyMarkup: sessionsReplyKeyboard(ctx.sessionsFile),
     });
+    return true;
+  }
+
+  if (command === "/model") {
+    logger.debug("command", `chat_id=${chatId} command=/model`);
+    const arg = text.split(/\s+/).slice(1).join(" ").trim();
+    if (arg) {
+      saveModel(ctx.sessionsFile, arg);
+      await sendMessage(ctx.telegram, chatId, `Model: ${arg}`, { replyToMessageId: messageId });
+    } else {
+      const current = loadModel(ctx.sessionsFile);
+      const buttons = [
+        [{ text: "Sonnet 4.5", callback_data: "model:claude-sonnet-4-5-20250929" }],
+        [{ text: "Opus 4.6", callback_data: "model:claude-opus-4-6" }],
+        [{ text: "Haiku 4.5", callback_data: "model:claude-haiku-4-5-20251001" }],
+      ];
+      const label = current ? `Current model: ${current}` : "Select model:";
+      await sendMessage(ctx.telegram, chatId, label, {
+        replyToMessageId: messageId,
+        replyMarkup: { inline_keyboard: buttons },
+      });
+    }
     return true;
   }
 

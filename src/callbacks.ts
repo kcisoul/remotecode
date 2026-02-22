@@ -6,11 +6,12 @@ import {
   answerCallbackQuery,
 } from "./telegram";
 import { logger, errorMessage } from "./logger";
-import { HandlerContext, isUserAllowed } from "./context";
+import { HandlerContext, isUserAllowed, activeQueries } from "./context";
 import {
   loadActiveSessionId,
   saveActiveSessionId,
   saveSessionCwd,
+  saveModel,
   discoverSessions,
   discoverProjects,
   discoverProjectSessions,
@@ -28,6 +29,53 @@ import {
   sessionsReplyKeyboard,
 } from "./session-ui";
 
+// ---------- pending ask/perm systems ----------
+const pendingAsk = new Map<string, {
+  resolve: (answer: Record<string, string>) => void;
+  timer: ReturnType<typeof setTimeout>;
+}>();
+
+const pendingPerm = new Map<string, {
+  resolve: (decision: "allow" | "deny") => void;
+  timer: ReturnType<typeof setTimeout>;
+}>();
+
+const PENDING_TIMEOUT_MS = 300_000; // 5 minutes
+
+export function registerPendingAsk(id: string): Promise<Record<string, string>> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingAsk.delete(id);
+      reject(new Error("Timeout waiting for user response"));
+    }, PENDING_TIMEOUT_MS);
+    pendingAsk.set(id, { resolve, timer });
+  });
+}
+
+export function registerPendingPerm(id: string): Promise<"allow" | "deny"> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingPerm.delete(id);
+      reject(new Error("Timeout waiting for permission response"));
+    }, PENDING_TIMEOUT_MS);
+    pendingPerm.set(id, { resolve, timer });
+  });
+}
+
+export function denyAllPending(): void {
+  for (const [id, pending] of pendingPerm) {
+    clearTimeout(pending.timer);
+    pending.resolve("deny");
+  }
+  pendingPerm.clear();
+  for (const [id, pending] of pendingAsk) {
+    clearTimeout(pending.timer);
+    pending.resolve({ answer: "" });
+  }
+  pendingAsk.clear();
+}
+
+// ---------- project list markup ----------
 export function buildProjectListMarkup(): { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> } {
   const projects = discoverProjects();
   const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
@@ -50,6 +98,7 @@ export function buildProjectListMarkup(): { inline_keyboard: Array<Array<{ text:
   return { inline_keyboard: buttons };
 }
 
+// ---------- main callback handler ----------
 export async function handleCallbackQuery(callback: CallbackQuery, ctx: HandlerContext): Promise<void> {
   const user = callback.from;
   try { await answerCallbackQuery(ctx.telegram, callback.id); } catch { /* ignore */ }
@@ -74,12 +123,74 @@ export async function handleCallbackQuery(callback: CallbackQuery, ctx: HandlerC
     if (data.startsWith("proj:")) return handleProjectCallback(data, chatId, messageId, ctx);
     if (data.startsWith("sessdel:")) return handleSessionDeleteCallback(data, chatId, messageId, ctx);
     if (data.startsWith("sess:")) return handleSessionCallback(data, chatId, messageId, ctx);
+    if (data.startsWith("ask:")) return handleAskCallback(data, chatId, messageId, ctx);
+    if (data.startsWith("perm:")) return handlePermCallback(data, chatId, messageId, ctx);
+    if (data.startsWith("model:")) return handleModelCallback(data, chatId, messageId, ctx);
   } catch (err) {
     logger.error("callback", `Error in handleCallbackQuery: ${errorMessage(err)}`, err);
     await sendMessage(ctx.telegram, chatId, `Error: ${errorMessage(err)}`, { replyToMessageId: messageId });
   }
 }
 
+// ---------- ask callback ----------
+async function handleAskCallback(
+  data: string,
+  chatId: number,
+  messageId: number,
+  ctx: HandlerContext
+): Promise<void> {
+  // Format: "ask:<id>:<optionIndex>:<label>"
+  const parts = data.split(":");
+  const id = parts[1];
+  const label = parts.slice(3).join(":");
+  const pending = pendingAsk.get(id);
+  if (pending) {
+    clearTimeout(pending.timer);
+    pendingAsk.delete(id);
+    pending.resolve({ answer: label });
+  }
+  try {
+    await editMessageText(ctx.telegram, chatId, messageId, `Selected: ${label}`);
+  } catch { /* ignore */ }
+}
+
+// ---------- perm callback ----------
+async function handlePermCallback(
+  data: string,
+  chatId: number,
+  messageId: number,
+  ctx: HandlerContext
+): Promise<void> {
+  // Format: "perm:<id>:allow" or "perm:<id>:deny"
+  const parts = data.split(":");
+  const id = parts[1];
+  const decision = parts[2] as "allow" | "deny";
+  const pending = pendingPerm.get(id);
+  if (pending) {
+    clearTimeout(pending.timer);
+    pendingPerm.delete(id);
+    pending.resolve(decision);
+  }
+  try {
+    await editMessageText(ctx.telegram, chatId, messageId, decision === "allow" ? "Allowed" : "Denied");
+  } catch { /* ignore */ }
+}
+
+// ---------- model callback ----------
+async function handleModelCallback(
+  data: string,
+  chatId: number,
+  messageId: number,
+  ctx: HandlerContext
+): Promise<void> {
+  const model = data.slice("model:".length);
+  saveModel(ctx.sessionsFile, model);
+  try {
+    await editMessageText(ctx.telegram, chatId, messageId, `Model: ${model}`);
+  } catch { /* ignore */ }
+}
+
+// ---------- project callback ----------
 async function handleProjectCallback(
   data: string,
   chatId: number,
@@ -135,6 +246,7 @@ async function handleProjectCallback(
   } catch { /* ignore */ }
 }
 
+// ---------- session callback ----------
 async function handleSessionCallback(
   data: string,
   chatId: number,
@@ -175,6 +287,13 @@ async function handleSessionCallback(
     return;
   }
 
+  // Abort active query on the old session
+  const oldId = loadActiveSessionId(ctx.sessionsFile);
+  if (oldId) {
+    const controller = activeQueries.get(oldId);
+    if (controller) controller.abort();
+  }
+
   saveActiveSessionId(ctx.sessionsFile, session.sessionId);
   saveSessionCwd(ctx.sessionsFile, session.project);
 
@@ -188,6 +307,7 @@ async function handleSessionCallback(
   });
 }
 
+// ---------- session delete callback ----------
 async function handleSessionDeleteCallback(
   data: string,
   chatId: number,
