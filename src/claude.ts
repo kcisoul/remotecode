@@ -141,6 +141,60 @@ export function markSessionStale(sessionId: string): void {
   }
 }
 
+// ---------- session creation helper ----------
+
+function initNewSession(
+  prompt: string,
+  sessionId: string,
+  options: QueryOptions,
+  resume: boolean,
+): SessionState {
+  logger.debug(
+    "claude",
+    `new session: ${sessionId.slice(0, 8)} resume=${resume} model=${options.model || "default"}`,
+  );
+
+  const canUseToolRef: { current: CanUseToolFn | undefined } = {
+    current: options.canUseTool,
+  };
+  const wrappedCanUseTool: CanUseToolFn = (toolName, input, opts) => {
+    if (!canUseToolRef.current) {
+      return Promise.resolve({ behavior: "deny" as const, message: "No handler" });
+    }
+    return canUseToolRef.current(toolName, input, opts);
+  };
+
+  const channel = new MessageChannel();
+  channel.push(createUserMessage(prompt, sessionId));
+
+  const q = query({
+    prompt: channel,
+    options: {
+      ...(resume ? { resume: sessionId } : { sessionId }),
+      cwd: options.cwd,
+      model: options.model,
+      permissionMode: options.yolo ? "bypassPermissions" : undefined,
+      allowDangerouslySkipPermissions: options.yolo || undefined,
+      canUseTool: wrappedCanUseTool,
+    },
+  });
+
+  const newSession: SessionState = {
+    q,
+    channel,
+    sessionId,
+    canUseToolRef,
+    turnLock: Promise.resolve(),
+    releaseTurn: null,
+    interrupted: false,
+    stale: false,
+  };
+
+  sessions.set(sessionId, newSession);
+  newSession.turnLock = new Promise((r) => { newSession.releaseTurn = r; });
+  return newSession;
+}
+
 // ---------- main query function ----------
 
 export async function* querySession(
@@ -186,60 +240,16 @@ export async function* querySession(
       }
     }
   } else {
-    // Create new session
     const hasFile = !!findSessionFilePath(sessionId);
-
-    logger.debug(
-      "claude",
-      `new session: ${sessionId.slice(0, 8)} resume=${hasFile} model=${options.model || "default"}`,
-    );
-
-    // Mutable canUseTool reference so handler can update per-message
-    const canUseToolRef: { current: CanUseToolFn | undefined } = {
-      current: options.canUseTool,
-    };
-    const wrappedCanUseTool: CanUseToolFn = (toolName, input, opts) => {
-      if (!canUseToolRef.current) {
-        return Promise.resolve({ behavior: "deny" as const, message: "No handler" });
-      }
-      return canUseToolRef.current(toolName, input, opts);
-    };
-
-    // Create message channel (streaming input mode) and push first message
-    const channel = new MessageChannel();
-    channel.push(createUserMessage(prompt, sessionId));
-
-    const q = query({
-      prompt: channel,
-      options: {
-        ...(hasFile
-          ? { resume: sessionId }
-          : { sessionId }),
-        cwd: options.cwd,
-        model: options.model,
-        permissionMode: options.yolo ? "bypassPermissions" : undefined,
-        allowDangerouslySkipPermissions: options.yolo || undefined,
-        canUseTool: wrappedCanUseTool,
-      },
-    });
-
-    const newSession: SessionState = {
-      q,
-      channel,
-      sessionId,
-      canUseToolRef,
-      turnLock: Promise.resolve(),
-      releaseTurn: null,
-      interrupted: false,
-      stale: false,
-    };
-
-    sessions.set(sessionId, newSession);
-
-    // Acquire turn lock for this turn
-    newSession.turnLock = new Promise((r) => { newSession.releaseTurn = r; });
+    let newSession = initNewSession(prompt, sessionId, options, hasFile);
 
     try {
+      yield* readUntilResult(sessionId);
+    } catch (err) {
+      if (!hasFile) throw err;
+      // Resume failed (e.g. corrupted JSONL) — retry as fresh session
+      logger.warn("claude", `resume failed for ${sessionId.slice(0, 8)}, retrying as new session`);
+      newSession = initNewSession(prompt, sessionId, options, false);
       yield* readUntilResult(sessionId);
     } finally {
       if (newSession.releaseTurn) {

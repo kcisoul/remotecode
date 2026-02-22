@@ -1,5 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
+import { execSync } from "child_process";
 import { loadConfig, getConfig, ensureConfigDir, globalConfigDir, pidFilePath, logFilePath, sessionsFilePath } from "./config";
 import { printBanner, stopBannerResize } from "./banner";
 import { formatTimeAgo } from "./session-ui";
@@ -9,7 +10,7 @@ import { getSttSummary, getSttDetailLines, isMacOS } from "./stt";
 import { isDaemonRunning, isPrivileged, killOrphanDaemons, spawnDaemon } from "./daemon";
 
 // ---------- Subcommands ----------
-export async function cmdStart(): Promise<void> {
+export async function cmdStart(opts?: { followLogs?: boolean }): Promise<void> {
   const { running, pid } = isDaemonRunning();
   if (running) {
     printBanner(["Already running (pid " + pid + ").", "Use 'remotecode restart' to restart."]);
@@ -30,7 +31,9 @@ export async function cmdStart(): Promise<void> {
   killOrphanDaemons();
   await spawnDaemon();
   cmdStatus();
-  cmdLogs({ follow: true, lines: 10, level: null, tag: null });
+  if (opts?.followLogs !== false) {
+    cmdLogs({ follow: true, lines: 10, level: null, tag: null });
+  }
 }
 
 export async function cmdStop(): Promise<void> {
@@ -40,20 +43,54 @@ export async function cmdStop(): Promise<void> {
     killOrphanDaemons();
     return;
   }
-  process.kill(pid, "SIGTERM");
-  // Wait for process to exit
+  // Collect ALL descendant PIDs before killing (SDK may spawn claude in separate process groups)
+  const descendants = collectDescendants(pid);
+
+  // Kill entire process group (daemon + direct children in same group)
+  try { process.kill(-pid, "SIGTERM"); } catch { process.kill(pid, "SIGTERM"); }
+  // Wait for daemon to exit
   for (let i = 0; i < 30; i++) {
     await new Promise((resolve) => setTimeout(resolve, 100));
-    if (!(await isStillRunning(pid))) {
-      console.log(`RemoteCode stopped (pid ${pid}).`);
-      killOrphanDaemons(); // clean up any other orphans
-      return;
-    }
+    if (!isStillRunning(pid)) break;
   }
-  console.error(`Process ${pid} did not exit in time. Sending SIGKILL...`);
-  try { process.kill(pid, "SIGKILL"); } catch { /* process already exited */ }
+  if (isStillRunning(pid)) {
+    try { process.kill(-pid, "SIGKILL"); } catch { try { process.kill(pid, "SIGKILL"); } catch { /* already exited */ } }
+  }
+
+  // Kill surviving descendants (e.g. SDK-spawned claude processes in their own process groups)
+  for (const desc of descendants) {
+    if (desc === process.pid) continue;
+    try { process.kill(desc, "SIGKILL"); } catch { /* already exited */ }
+  }
+
   killOrphanDaemons();
-  console.log("RemoteCode killed.");
+  console.log(`RemoteCode stopped (pid ${pid}).`);
+}
+
+/** Walk the process tree and collect all descendant PIDs of rootPid */
+function collectDescendants(rootPid: number): number[] {
+  const result: number[] = [];
+  try {
+    const out = execSync("ps -eo pid,ppid", { stdio: "pipe" }).toString();
+    const children = new Map<number, number[]>();
+    for (const line of out.trim().split("\n").slice(1)) {
+      const parts = line.trim().split(/\s+/);
+      const pid = parseInt(parts[0], 10);
+      const ppid = parseInt(parts[1], 10);
+      if (isNaN(pid) || isNaN(ppid)) continue;
+      if (!children.has(ppid)) children.set(ppid, []);
+      children.get(ppid)!.push(pid);
+    }
+    const queue = [rootPid];
+    while (queue.length > 0) {
+      const p = queue.shift()!;
+      for (const child of children.get(p) || []) {
+        result.push(child);
+        queue.push(child);
+      }
+    }
+  } catch { /* ps failed */ }
+  return result;
 }
 
 function isStillRunning(pid: number): boolean {
@@ -70,7 +107,7 @@ export async function cmdRestart(): Promise<void> {
   if (running) {
     await cmdStop();
   }
-  await cmdStart();
+  await cmdStart({ followLogs: false });
 }
 
 function formatUptime(ms: number): string {

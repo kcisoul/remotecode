@@ -181,6 +181,26 @@ async function pollLoop(telegramConfig: TelegramConfig, ctx: HandlerContext): Pr
   let offset = 0;
   let conflictCount = 0;
   const MAX_CONFLICT_RETRIES = 3;
+
+  // Flush pending updates from before daemon start to avoid processing stale messages
+  try {
+    const pending = await getUpdates(telegramConfig, -1, 0);
+    if (pending.length > 0) {
+      offset = pending[pending.length - 1].update_id + 1;
+      const texts = pending
+        .map((u) => u.message?.text || u.callback_query?.data || "")
+        .filter(Boolean);
+      logger.info("poll", `Flushed ${pending.length} pending update(s)`);
+      const chatId = pending[0].message?.chat.id || pending[0].callback_query?.message?.chat.id;
+      if (chatId) {
+        const dropped = texts.length > 0 ? `\n\nDropped: ${texts.join(", ")}` : "";
+        await sendMessage(telegramConfig, chatId, `RemoteCode restarted.${dropped}`);
+      }
+    }
+  } catch (err) {
+    logger.debug("poll", `flush pending: ${errorMessage(err)}`);
+  }
+
   logger.info("poll", "Polling for updates...");
 
   while (true) {
