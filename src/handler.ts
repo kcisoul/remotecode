@@ -153,6 +153,9 @@ export function unsuppressSessionMessages(sessionId: string): void {
   suppressedSessions.delete(sessionId);
 }
 
+// ---------- query cleanup timeouts (prevent stale guard removal) ----------
+const queryCleanupTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
+
 // ---------- message queue ----------
 interface QueuedMessage {
   prompt: string;
@@ -532,6 +535,13 @@ async function executePrompt(
   const cwd = loadSessionCwd(ctx.sessionsFile) || defaultCwd();
   const model = loadModel(ctx.sessionsFile);
 
+  // Cancel any pending cleanup timeout — we're starting a new query for this session
+  const prevCleanup = queryCleanupTimeouts.get(sessionId);
+  if (prevCleanup) {
+    clearTimeout(prevCleanup);
+    queryCleanupTimeouts.delete(sessionId);
+  }
+
   processingTurns.add(sessionId);
   activeQueries.add(sessionId);
   const stopTyping = startTyping(ctx.telegram, chatId);
@@ -552,9 +562,17 @@ async function executePrompt(
     skipToEnd();
     suppressedSessions.delete(sessionId);
 
-    // Delay watcher guard removal to let SDK finish writing to JSONL
+    // Delay watcher guard removal to let SDK finish writing to JSONL.
+    // Cancel any previous timeout first to prevent stale removal during a new query.
     const sid = sessionId;
-    setTimeout(() => { skipToEnd(); activeQueries.delete(sid); }, 2000);
+    const prevTimer = queryCleanupTimeouts.get(sid);
+    if (prevTimer) clearTimeout(prevTimer);
+    const cleanupTimer = setTimeout(() => {
+      skipToEnd();
+      activeQueries.delete(sid);
+      queryCleanupTimeouts.delete(sid);
+    }, 2000);
+    queryCleanupTimeouts.set(sid, cleanupTimer);
 
     // Auto-close non-active session processes when their task finishes
     const currentActiveId = getOrCreateSessionId(ctx.sessionsFile);
@@ -562,6 +580,10 @@ async function executePrompt(
     const hasQueuedMessages = queue && queue.length > 0;
 
     if (sessionId !== currentActiveId && !hasQueuedMessages) {
+      const closingTimer = queryCleanupTimeouts.get(sessionId);
+      if (closingTimer) clearTimeout(closingTimer);
+      queryCleanupTimeouts.delete(sessionId);
+      activeQueries.delete(sessionId);
       closeSession(sessionId);
       processingTurns.delete(sessionId);
       return;

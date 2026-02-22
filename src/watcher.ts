@@ -202,8 +202,12 @@ export function startWatcher(telegram: TelegramConfig, sessionsFile: string): vo
   }, 3000);
 }
 
-/** Advance watcher offset to end-of-file so pending debounce won't re-send SDK data */
+/** Advance watcher offset to end-of-file and cancel pending debounce so SDK data won't be re-sent */
 export function skipToEnd(): void {
+  if (state.debounceTimer) {
+    clearTimeout(state.debounceTimer);
+    state.debounceTimer = null;
+  }
   if (state.currentFilePath) {
     silentTry("watcher", "skipToEnd stat", () => {
       state.lastByteOffset = fs.statSync(state.currentFilePath!).size;
