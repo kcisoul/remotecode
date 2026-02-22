@@ -190,6 +190,16 @@ export function startWatcher(telegram: TelegramConfig, sessionsFile: string): vo
   }, 3000);
 }
 
+/** Advance watcher offset to end-of-file so pending debounce won't re-send SDK data */
+export function skipToEnd(): void {
+  if (state.currentFilePath) {
+    try {
+      state.lastByteOffset = fs.statSync(state.currentFilePath).size;
+      state.lineBuf = "";
+    } catch { /* ignore */ }
+  }
+}
+
 export function stopWatcher(): void {
   if (state.currentWatcher) {
     state.currentWatcher.close();

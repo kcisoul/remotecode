@@ -8,6 +8,7 @@ import {
 import { logger, errorMessage } from "./logger";
 import { HandlerContext, isUserAllowed, activeQueries } from "./context";
 import { closeActiveQuery } from "./claude";
+import { resetSessionAutoAllow, setSessionAutoAllow } from "./handler";
 import {
   loadActiveSessionId,
   saveActiveSessionId,
@@ -37,7 +38,7 @@ const pendingAsk = new Map<string, {
 }>();
 
 const pendingPerm = new Map<string, {
-  resolve: (decision: "allow" | "deny") => void;
+  resolve: (decision: "allow" | "deny" | "allowall") => void;
   timer: ReturnType<typeof setTimeout>;
 }>();
 
@@ -53,7 +54,7 @@ export function registerPendingAsk(id: string): Promise<Record<string, string>> 
   });
 }
 
-export function registerPendingPerm(id: string): Promise<"allow" | "deny"> {
+export function registerPendingPerm(id: string): Promise<"allow" | "deny" | "allowall"> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       pendingPerm.delete(id);
@@ -162,18 +163,22 @@ async function handlePermCallback(
   messageId: number,
   ctx: HandlerContext
 ): Promise<void> {
-  // Format: "perm:<id>:allow" or "perm:<id>:deny"
+  // Format: "perm:<id>:allow" or "perm:<id>:deny" or "perm:<id>:allowall"
   const parts = data.split(":");
   const id = parts[1];
-  const decision = parts[2] as "allow" | "deny";
+  const decision = parts[2] as "allow" | "deny" | "allowall";
   const pending = pendingPerm.get(id);
   if (pending) {
     clearTimeout(pending.timer);
     pendingPerm.delete(id);
+    if (decision === "allowall") {
+      setSessionAutoAllow();
+    }
     pending.resolve(decision);
   }
+  const labels: Record<string, string> = { allow: "Allowed", deny: "Denied", allowall: "Allowed (all)" };
   try {
-    await editMessageText(ctx.telegram, chatId, messageId, decision === "allow" ? "Allowed" : "Denied");
+    await editMessageText(ctx.telegram, chatId, messageId, labels[decision] || decision);
   } catch { /* ignore */ }
 }
 
@@ -218,6 +223,7 @@ async function handleProjectCallback(
     const projectPath = decodeProjectPath(dir);
     denyAllPending();
     closeActiveQuery();
+    resetSessionAutoAllow();
     createNewSession(ctx.sessionsFile, projectPath);
     const name = projectPath.split("/").pop() || projectPath;
     try { await deleteMessage(ctx.telegram, chatId, messageId); } catch { /* ignore */ }
@@ -280,6 +286,7 @@ async function handleSessionCallback(
   if (action === "new") {
     denyAllPending();
     closeActiveQuery();
+    resetSessionAutoAllow();
     createNewSession(ctx.sessionsFile);
     try { await deleteMessage(ctx.telegram, chatId, messageId); } catch { /* ignore */ }
     await sendMessage(ctx.telegram, chatId, "New session started.", { replyMarkup: sessionsReplyKeyboard(ctx.sessionsFile) });
@@ -295,6 +302,7 @@ async function handleSessionCallback(
   // Close persistent query on the old session
   denyAllPending();
   closeActiveQuery();
+  resetSessionAutoAllow();
   const oldId = loadActiveSessionId(ctx.sessionsFile);
   if (oldId) activeQueries.delete(oldId);
 

@@ -26,6 +26,7 @@ import { handleCommand } from "./commands";
 import { HandlerContext, isUserAllowed, activeQueries } from "./context";
 import { registerPendingAsk, registerPendingPerm, denyAllPending } from "./callbacks";
 import { isSttReady, isMacOS, checkSttStatus } from "./stt";
+import { skipToEnd } from "./watcher";
 
 // ---------- unauthorized tracking ----------
 const warnedUsers = new Set<string>();
@@ -111,6 +112,23 @@ function startTyping(config: TelegramConfig, chatId: number): () => void {
   return () => clearInterval(interval);
 }
 
+// ---------- tool message filtering ----------
+const SILENT_TOOLS = new Set([
+  "TodoWrite", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet",
+  "TodoRead", "AskUserQuestion",
+]);
+
+// ---------- session-level auto-allow ----------
+let sessionAutoAllow = false;
+
+export function resetSessionAutoAllow(): void {
+  sessionAutoAllow = false;
+}
+
+export function setSessionAutoAllow(): void {
+  sessionAutoAllow = true;
+}
+
 // ---------- tool description formatting ----------
 function formatToolDescription(toolName: string, input: Record<string, unknown>): string {
   const e = escapeHtml;
@@ -159,26 +177,30 @@ function buildCanUseTool(ctx: HandlerContext, chatId: number, messageId: number)
       }
     }
 
-    // 2) Yolo mode → auto-allow everything
-    if (ctx.yolo) {
+    // 2) Yolo mode or session auto-allow → auto-allow everything
+    if (ctx.yolo || sessionAutoAllow) {
       return { behavior: "allow" as const, updatedInput: input };
     }
 
-    // 3) Non-yolo → Allow/Deny inline keyboard
+    // 3) Non-yolo → Allow/Deny/Allow all inline keyboard
     const permId = crypto.randomUUID().slice(0, 8);
-    const desc = formatToolDescription(toolName, input);
-    const reason = decisionReason ? `\n<i>${escapeHtml(decisionReason)}</i>` : "";
-    const buttons = [[
-      { text: "Allow", callback_data: `perm:${permId}:allow` },
-      { text: "Deny", callback_data: `perm:${permId}:deny` },
-    ]];
-    await sendMessage(ctx.telegram, chatId, `${desc}${reason}`, {
+    const reason = decisionReason ? `<i>${escapeHtml(decisionReason)}</i>` : "Allow?";
+    const buttons = [
+      [
+        { text: "Allow", callback_data: `perm:${permId}:allow` },
+        { text: "Deny", callback_data: `perm:${permId}:deny` },
+      ],
+      [
+        { text: "Allow all", callback_data: `perm:${permId}:allowall` },
+      ],
+    ];
+    await sendMessage(ctx.telegram, chatId, reason, {
       replyToMessageId: messageId,
       parseMode: "HTML",
       replyMarkup: { inline_keyboard: buttons },
     });
     const result = await registerPendingPerm(permId);
-    if (result === "allow") {
+    if (result === "allow" || result === "allowall") {
       return { behavior: "allow" as const, updatedInput: input };
     }
     return { behavior: "deny" as const, message: "User denied", interrupt: true };
@@ -354,7 +376,7 @@ async function handlePrompt(
           if (block.type === "text" && block.text) {
             textParts.push(block.text);
           }
-          if (block.type === "tool_use" && block.name) {
+          if (block.type === "tool_use" && block.name && !SILENT_TOOLS.has(block.name)) {
             const desc = formatToolDescription(block.name, block.input || {});
             await sendMessage(ctx.telegram, chatId, desc, {
               replyToMessageId: messageId,
@@ -421,6 +443,7 @@ async function handlePrompt(
     }
   } finally {
     stopTyping();
+    skipToEnd();
     activeQueries.delete(sessionId);
   }
 }
