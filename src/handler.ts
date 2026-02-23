@@ -238,6 +238,11 @@ function buildCanUseTool(ctx: HandlerContext, chatId: number, messageId: number,
   let permGate: Promise<void> = Promise.resolve();
 
   return async (toolName, input, { decisionReason }) => {
+    // Guard: if session was suppressed (switched away), auto-allow without UI
+    if (suppressedSessions.has(sessionId)) {
+      return { behavior: "allow" as const, updatedInput: input };
+    }
+
     // 1) AskUserQuestion → inline keyboard with options
     if (toolName === "AskUserQuestion") {
       // Flush accumulated text so the user sees context before the question
