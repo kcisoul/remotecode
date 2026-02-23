@@ -1,5 +1,8 @@
 import axios from "axios";
+import https from "https";
 import { logger } from "./logger";
+
+const httpsAgent = new https.Agent({ family: 4 });
 
 export interface TelegramConfig {
   botToken: string;
@@ -63,7 +66,7 @@ export interface CallbackQuery {
 // ---------- internal helpers ----------
 function callApi<T>(token: string, method: string, body: Record<string, unknown>, timeoutMs: number = 30000): Promise<T> {
   return axios
-    .post(`https://api.telegram.org/bot${token}/${method}`, body, { timeout: timeoutMs })
+    .post(`https://api.telegram.org/bot${token}/${method}`, body, { timeout: timeoutMs, httpsAgent })
     .then((resp) => {
       if (!resp.data.ok) throw new Error(`Telegram API error: ${JSON.stringify(resp.data)}`);
       return resp.data.result as T;
