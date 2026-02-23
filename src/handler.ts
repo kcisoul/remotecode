@@ -207,14 +207,23 @@ function formatToolDescription(toolName: string, input: Record<string, unknown>)
   }
 }
 
+// ---------- flush reference for canUseTool ----------
+/** Mutable reference that canUseTool uses to flush accumulated text before showing UI. */
+export interface FlushRef {
+  flush: () => Promise<void>;
+}
+
 // ---------- canUseTool callback builder ----------
-function buildCanUseTool(ctx: HandlerContext, chatId: number, messageId: number, sessionId: string): CanUseToolFn {
+function buildCanUseTool(ctx: HandlerContext, chatId: number, messageId: number, sessionId: string, flushRef?: FlushRef): CanUseToolFn {
   // Serialize permission dialogs so only one is shown at a time
   let permGate: Promise<void> = Promise.resolve();
 
   return async (toolName, input, { decisionReason }) => {
     // 1) AskUserQuestion → inline keyboard with options
     if (toolName === "AskUserQuestion") {
+      // Flush accumulated text so the user sees context before the question
+      if (flushRef) await flushRef.flush();
+
       const questions = input.questions as Array<{
         question: string;
         options: Array<{ label: string; description?: string }>;
@@ -536,12 +545,29 @@ async function streamResponse(
   const textParts: string[] = [];
   let gotResult = false;
 
+  // Mutable flush ref: canUseTool calls this to send accumulated text
+  // before showing interactive UI (e.g. AskUserQuestion keyboard).
+  const flushRef: FlushRef = {
+    flush: async () => {
+      if (suppressedSessions.has(sessionId)) return;
+      if (textParts.length === 0) return;
+      const text = textParts.join("\n").trim().replace(/<thinking>[\s\S]*?<\/thinking>\s*/g, "").trim();
+      if (!text) return;
+      const formatted = tryMdToHtml(text);
+      await sendMessage(ctx.telegram, chatId, formatted.text, {
+        replyToMessageId: messageId,
+        parseMode: formatted.parseMode,
+      });
+      textParts.length = 0;
+    },
+  };
+
   for await (const msg of querySession(prompt, {
     sessionId,
     cwd: options.cwd,
     yolo: ctx.yolo,
     model: options.model,
-    canUseTool: buildCanUseTool(ctx, chatId, messageId, sessionId),
+    canUseTool: buildCanUseTool(ctx, chatId, messageId, sessionId, flushRef),
   })) {
     // Skip sending messages if session was switched away
     const suppressed = suppressedSessions.has(sessionId);
