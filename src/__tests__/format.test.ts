@@ -50,7 +50,7 @@ describe("mdToTelegramHtml", () => {
     expect(result).toContain("&lt;div&gt;hi&lt;/div&gt;");
   });
 
-  it("converts markdown table to box-drawing in <pre>", () => {
+  it("converts markdown table to bullet list", () => {
     const table = [
       "| Command | Description |",
       "|---|---|",
@@ -58,30 +58,26 @@ describe("mdToTelegramHtml", () => {
       "| /model | Switch model |",
     ].join("\n");
     const result = mdToTelegramHtml(table);
-    expect(result).toContain("<pre>");
-    expect(result).toContain("┌");
-    expect(result).toContain("│ Command");
-    expect(result).toContain("│ /cancel");
-    expect(result).toContain("│ /model");
-    expect(result).toContain("└");
+    expect(result).toContain("• Command: /cancel");
+    expect(result).toContain("  Description: Cancel task");
+    expect(result).toContain("• Command: /model");
+    expect(result).toContain("  Description: Switch model");
   });
 
   it("converts table with surrounding text", () => {
     const md = "Here is a table:\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\nDone.";
     const result = mdToTelegramHtml(md);
     expect(result).toContain("Here is a table:");
-    expect(result).toContain("<pre>");
-    expect(result).toContain("│ A │ B │");
-    expect(result).toContain("│ 1 │ 2 │");
+    expect(result).toContain("• A: 1");
+    expect(result).toContain("  B: 2");
     expect(result).toContain("Done.");
   });
 
-  it("pads columns to equal width", () => {
+  it("uses header as key for each column", () => {
     const table = "| A | Long Header |\n|---|---|\n| short | x |";
     const result = mdToTelegramHtml(table);
-    // "Long Header" is 11 chars, "x" should be padded
-    expect(result).toContain("Long Header");
-    expect(result).toContain("x ");
+    expect(result).toContain("• A: short");
+    expect(result).toContain("  Long Header: x");
   });
 
   it("leaves non-table pipe text alone", () => {

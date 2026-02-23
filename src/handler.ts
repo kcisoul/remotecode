@@ -26,7 +26,7 @@ import {
 import { sessionsReplyKeyboard } from "./session-ui";
 import { handleCommand } from "./commands";
 import { HandlerContext, isUserAllowed, activeQueries } from "./context";
-import { registerPendingAsk, registerPendingPerm, denyAllPending, hasPendingPerms, consumePendingInput, isPermDenied, clearPermDenied, type PermMeta } from "./callbacks";
+import { registerPendingAsk, registerPendingPerm, denyAllPending, hasPendingPerms, hasPendingAsks, consumePendingInput, isPermDenied, clearPermDenied, type PermMeta } from "./callbacks";
 import { isSttReady, isMacOS, checkSttStatus } from "./stt";
 import { skipToEnd } from "./watcher";
 import { isAssistantMessage, isSystemInit, isTaskStarted, isTaskNotification, isResult, isResultError } from "./sdk-types";
@@ -255,10 +255,13 @@ function buildCanUseTool(ctx: HandlerContext, chatId: number, messageId: number,
       const q = questions?.[0];
       if (q) {
         const askId = crypto.randomUUID().slice(0, 8);
-        const buttons = q.options.map((opt, i) => [{
-          text: opt.label,
-          callback_data: `ask:${askId}:${i}:${opt.label}`,
-        }]);
+        const buttons = [
+          ...q.options.map((opt, i) => [{
+            text: opt.label,
+            callback_data: `ask:${askId}:${i}:${opt.label}`,
+          }]),
+          [{ text: "Skip answer", callback_data: `ask:${askId}:-1:` }],
+        ];
         // Pause typing while waiting for user answer
         flushRef?.pauseTyping();
         try {
@@ -266,7 +269,10 @@ function buildCanUseTool(ctx: HandlerContext, chatId: number, messageId: number,
             replyToMessageId: messageId,
             replyMarkup: { inline_keyboard: buttons },
           });
-          const answer = await registerPendingAsk(askId);
+          const answer = await registerPendingAsk(askId, {
+            question: q.question,
+            options: q.options.map(o => o.label),
+          });
           return { behavior: "allow" as const, updatedInput: { ...input, answers: answer } };
         } finally {
           flushRef?.resumeTyping();
@@ -298,8 +304,13 @@ function buildCanUseTool(ctx: HandlerContext, chatId: number, messageId: number,
         return { behavior: "deny" as const, message: "Session interrupted", interrupt: true };
       }
 
+      // Flush accumulated text so user sees tool context before the dialog
+      if (flushRef) await flushRef.flush();
+
       const permId = crypto.randomUUID().slice(0, 8);
-      const reason = decisionReason ? `<i>${escapeHtml(decisionReason)}</i>` : "Allow?";
+      const reason = decisionReason
+        ? `Allow ${escapeHtml(toolName)}?\n<i>${escapeHtml(decisionReason)}</i>`
+        : `Allow ${escapeHtml(toolName)}?`;
       const buttons = [
         [
           { text: "Allow", callback_data: `perm:${permId}:allow` },
@@ -554,8 +565,8 @@ async function handlePrompt(
   // If this session is busy, queue the message
   if (processingTurns.has(sessionId)) {
     enqueue(sessionId, { prompt: formattedPrompt, chatId, messageId, ctx, voiceMode });
-    if (hasPendingPerms()) {
-      // Permission dialog open → deny to unblock, queue drains immediately
+    if (hasPendingPerms() || hasPendingAsks()) {
+      // Permission/ask dialog open → deny to unblock, queue drains immediately
       denyAllPending();
     }
     return;
@@ -605,7 +616,7 @@ async function streamResponse(
   for await (const msg of querySession(prompt, {
     sessionId,
     cwd: options.cwd,
-    yolo: ctx.yolo,
+    yolo: ctx.yolo || sessionYolo.get(sessionId) === true,
     model: options.model,
     canUseTool: buildCanUseTool(ctx, chatId, messageId, sessionId, flushRef),
   })) {

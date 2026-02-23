@@ -57,9 +57,15 @@ export function consumePendingInput(chatId: number): PendingInput["type"] | null
 }
 
 // ---------- pending ask/perm systems ----------
+export interface AskMeta {
+  question: string;
+  options: string[];
+}
+
 const pendingAsk = new Map<string, {
   resolve: (answer: Record<string, string>) => void;
   timer: ReturnType<typeof setTimeout>;
+  meta?: AskMeta;
 }>();
 
 export interface PermMeta {
@@ -82,13 +88,13 @@ const pendingPerm = new Map<string, {
 
 const PENDING_TIMEOUT_MS = 300_000; // 5 minutes
 
-export function registerPendingAsk(id: string): Promise<Record<string, string>> {
+export function registerPendingAsk(id: string, meta?: AskMeta): Promise<Record<string, string>> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       pendingAsk.delete(id);
       reject(new Error("Timeout waiting for user response"));
     }, PENDING_TIMEOUT_MS);
-    pendingAsk.set(id, { resolve, timer });
+    pendingAsk.set(id, { resolve, timer, meta });
   });
 }
 
@@ -139,6 +145,10 @@ export function allowAllPending(): void {
 
 export function hasPendingPerms(): boolean {
   return pendingPerm.size > 0;
+}
+
+export function hasPendingAsks(): boolean {
+  return pendingAsk.size > 0;
 }
 
 // ---------- per-session perm-denied flag (prevents queued canUseTool from showing dialogs after deny) ----------
@@ -253,7 +263,19 @@ async function handleAskCallback(
     pendingAsk.delete(id);
     pending.resolve({ answer: label });
   }
-  silentCatch("callback", "editAskResponse", editMessageText(ctx.telegram, chatId, messageId, `Selected: ${label}`));
+  let displayText: string;
+  if (label) {
+    displayText = `Selected: ${label}`;
+  } else {
+    const meta = pending?.meta;
+    if (meta) {
+      const quoted = `${meta.question}\n${meta.options.map(o => `- ${o}`).join("\n")}`;
+      displayText = `<blockquote>${escapeHtml(quoted)}</blockquote>\nAnswer skipped`;
+    } else {
+      displayText = "Answer skipped";
+    }
+  }
+  silentCatch("callback", "editAskResponse", editMessageText(ctx.telegram, chatId, messageId, displayText, label ? undefined : { parseMode: "HTML" }));
 }
 
 // ---------- perm callback ----------

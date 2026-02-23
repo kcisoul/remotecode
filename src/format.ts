@@ -2,8 +2,8 @@ export function escapeHtml(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-// ---------- markdown table → box-drawing conversion ----------
-function convertTables(text: string, codeBlocks: string[]): string {
+// ---------- markdown table → bullet list conversion ----------
+function convertTables(text: string): string {
   const lines = text.split("\n");
   const result: string[] = [];
   let i = 0;
@@ -24,29 +24,20 @@ function convertTables(text: string, codeBlocks: string[]): string {
         i++;
       }
 
-      // Calculate column widths
-      const colCount = headers.length;
-      const widths: number[] = [];
-      for (let c = 0; c < colCount; c++) {
-        let max = headers[c].length;
-        for (const row of rows) {
-          const cell = row[c] || "";
-          if (cell.length > max) max = cell.length;
+      const bulletLines: string[] = [];
+      for (const row of rows) {
+        bulletLines.push(`• ${headers[0]}: ${row[0] || ""}`);
+        for (let c = 1; c < headers.length; c++) {
+          bulletLines.push(`  ${headers[c]}: ${row[c] || ""}`);
         }
-        widths.push(max);
+        bulletLines.push("");
+      }
+      // Remove trailing empty line
+      if (bulletLines.length > 0 && bulletLines[bulletLines.length - 1] === "") {
+        bulletLines.pop();
       }
 
-      const pad = (s: string, w: number) => s + " ".repeat(Math.max(0, w - s.length));
-      const top    = "┌" + widths.map(w => "─".repeat(w + 2)).join("┬") + "┐";
-      const mid    = "├" + widths.map(w => "─".repeat(w + 2)).join("┼") + "┤";
-      const bottom = "└" + widths.map(w => "─".repeat(w + 2)).join("┴") + "┘";
-      const fmtRow = (cells: string[]) =>
-        "│" + cells.map((c, j) => ` ${pad(c, widths[j])} `).join("│") + "│";
-
-      const tableText = [top, fmtRow(headers), mid, ...rows.map(fmtRow), bottom].join("\n");
-      const idx = codeBlocks.length;
-      codeBlocks.push(`<pre>${escapeHtml(tableText)}</pre>`);
-      result.push(`\x00CODEBLOCK${idx}\x00`);
+      result.push(...bulletLines);
     } else {
       result.push(lines[i]);
       i++;
@@ -75,8 +66,8 @@ export function mdToTelegramHtml(md: string): string {
     return `\x00INLINE${idx}\x00`;
   });
 
-  // Convert markdown tables to box-drawing inside <pre> blocks
-  text = convertTables(text, codeBlocks);
+  // Convert markdown tables to bullet lists
+  text = convertTables(text);
 
   // Escape remaining HTML
   text = escapeHtml(text);
