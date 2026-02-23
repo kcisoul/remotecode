@@ -102,6 +102,10 @@ export function tryMdToHtml(text: string): { text: string; parseMode?: string } 
   }
 }
 
+export function stripThinking(text: string): string {
+  return text.replace(/<thinking>[\s\S]*?<\/thinking>\s*/g, "").trim();
+}
+
 export function truncateMessage(text: string, limit: number = 3500): string {
   if (text.length <= limit) return text;
   return text.slice(0, limit) + "\n...[truncated]";

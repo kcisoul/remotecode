@@ -22,9 +22,9 @@ import {
   sessionsReplyKeyboard,
 } from "./session-ui";
 import { HandlerContext } from "./context";
-import { buildProjectListDisplay, denyAllPending, allowAllPending } from "./callbacks";
+import { buildProjectListDisplay, denyAllPending, allowAllPending, stopOldSession } from "./callbacks";
 import { interruptSession } from "./claude";
-import { clearQueue, isSessionBusy, suppressSessionMessages, unsuppressSessionMessages, resetSessionAutoAllow, setSessionAutoAllow } from "./handler";
+import { clearQueue, isSessionBusy, suppressSessionMessages, setSessionAutoAllow, handlePrompt } from "./handler";
 
 export async function handleCommand(
   text: string,
@@ -177,8 +177,14 @@ export async function handleCommand(
     if (activeId && isSessionBusy(activeId)) {
       denyAllPending();
       clearQueue(activeId);
+      suppressSessionMessages(activeId);
       interruptSession(activeId);
       await sendMessage(ctx.telegram, chatId, "Task cancelled.", { replyToMessageId: messageId });
+      // Send follow-up to exit plan mode and clean up tasks
+      handlePrompt(
+        "The user has cancelled the current task. Exit plan mode immediately if you are in plan mode. Mark any in-progress tasks as completed. Do not continue any planned work. Just acknowledge briefly.",
+        chatId, messageId, ctx,
+      ).catch(() => {});
     } else {
       await sendMessage(ctx.telegram, chatId, "No active task to cancel.", { replyToMessageId: messageId });
     }
@@ -219,22 +225,4 @@ export async function handleCommand(
   }
 
   return false;
-}
-
-// ---------- stop old session on switch ----------
-function stopOldSession(sessionsFile: string, newSessionId?: string): void {
-  const oldId = loadActiveSessionId(sessionsFile);
-  if (oldId && oldId !== newSessionId) {
-    if (isSessionBusy(oldId)) {
-      suppressSessionMessages(oldId);
-      setSessionAutoAllow(oldId);
-      allowAllPending();
-    } else {
-      resetSessionAutoAllow(oldId);
-      denyAllPending();
-    }
-  }
-  if (newSessionId) {
-    unsuppressSessionMessages(newSessionId);
-  }
 }

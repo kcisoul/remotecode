@@ -28,7 +28,7 @@ export type CanUseToolFn = (
   },
 ) => Promise<PermissionResult>;
 
-export type { SDKMessage, PermissionResult };
+export type { SDKMessage, PermissionResult, MessageContent };
 
 export interface QueryOptions {
   sessionId: string | null;
@@ -81,7 +81,12 @@ class MessageChannel implements AsyncIterable<SDKUserMessage> {
   }
 }
 
-function createUserMessage(content: string, sessionId: string): SDKUserMessage {
+type MessageContent = string | Array<
+  | { type: "text"; text: string }
+  | { type: "image"; source: { type: "base64"; media_type: string; data: string } }
+>;
+
+function createUserMessage(content: MessageContent, sessionId: string): SDKUserMessage {
   return {
     type: "user",
     message: { role: "user", content } as SDKUserMessage["message"],
@@ -149,7 +154,7 @@ export function markSessionStale(sessionId: string): void {
 // ---------- session creation helper ----------
 
 function initNewSession(
-  prompt: string,
+  prompt: MessageContent,
   sessionId: string,
   options: QueryOptions,
   resume: boolean,
@@ -206,7 +211,7 @@ function initNewSession(
 // ---------- main query function ----------
 
 export async function* querySession(
-  prompt: string,
+  prompt: MessageContent,
   options: QueryOptions,
 ): AsyncGenerator<SDKMessage> {
   const sessionId = options.sessionId!;

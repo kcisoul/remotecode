@@ -12,8 +12,8 @@ import {
   sendChatAction,
   downloadFile,
 } from "./telegram";
-import { querySession, closeSession, wasSessionInterrupted, type CanUseToolFn } from "./claude";
-import { mdToTelegramHtml, escapeHtml, tryMdToHtml, truncateMessage } from "./format";
+import { querySession, closeSession, wasSessionInterrupted, type CanUseToolFn, type MessageContent } from "./claude";
+import { mdToTelegramHtml, escapeHtml, tryMdToHtml, truncateMessage, stripThinking } from "./format";
 import { logger, errorMessage, silentCatch, silentTry } from "./logger";
 import { defaultCwd, whisperModelPath, SILENT_TOOLS } from "./config";
 import {
@@ -26,7 +26,7 @@ import {
 import { sessionsReplyKeyboard } from "./session-ui";
 import { handleCommand } from "./commands";
 import { HandlerContext, isUserAllowed, activeQueries } from "./context";
-import { registerPendingAsk, registerPendingPerm, denyAllPending, hasPendingPerms, hasPendingAsks, consumePendingInput, isPermDenied, clearPermDenied, type PermMeta } from "./callbacks";
+import { registerPendingAsk, registerPendingPerm, denyAllPending, hasPendingPerms, hasPendingAsks, resolveAsksWithText, consumePendingInput, isPermDenied, clearPermDenied, stopOldSession, type PermMeta } from "./callbacks";
 import { isSttReady, isMacOS, checkSttStatus } from "./stt";
 import { skipToEnd } from "./watcher";
 import { isAssistantMessage, isSystemInit, isTaskStarted, isTaskNotification, isResult, isResultError } from "./sdk-types";
@@ -35,11 +35,26 @@ import { isAssistantMessage, isSystemInit, isTaskStarted, isTaskNotification, is
 const warnedUsers = new Set<string>();
 
 // ---------- prompt formatting ----------
-function formatPrompt(prompt: string, imagePaths?: string[]): string {
+function mimeFromExt(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === ".png") return "image/png";
+  if (ext === ".gif") return "image/gif";
+  if (ext === ".webp") return "image/webp";
+  return "image/jpeg";
+}
+
+function formatPrompt(prompt: string, imagePaths?: string[]): MessageContent {
   if (!imagePaths || imagePaths.length === 0) return prompt;
-  const parts = [prompt, "Image file path(s):"];
-  for (const p of imagePaths) parts.push(`- ${p}`);
-  return parts.join("\n\n");
+  const blocks: Array<
+    | { type: "text"; text: string }
+    | { type: "image"; source: { type: "base64"; media_type: string; data: string } }
+  > = [];
+  if (prompt) blocks.push({ type: "text", text: prompt });
+  for (const p of imagePaths) {
+    const data = fs.readFileSync(p).toString("base64");
+    blocks.push({ type: "image", source: { type: "base64", media_type: mimeFromExt(p), data } });
+  }
+  return blocks;
 }
 
 // ---------- image handling ----------
@@ -177,11 +192,12 @@ const queryCleanupTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
 
 // ---------- message queue ----------
 interface QueuedMessage {
-  prompt: string;
+  prompt: MessageContent;
   chatId: number;
   messageId: number;
   ctx: HandlerContext;
   voiceMode?: boolean;
+  quiet?: boolean;
 }
 
 const messageQueue = new Map<string, QueuedMessage[]>();
@@ -265,14 +281,14 @@ function buildCanUseTool(ctx: HandlerContext, chatId: number, messageId: number,
         // Pause typing while waiting for user answer
         flushRef?.pauseTyping();
         try {
-          await sendMessage(ctx.telegram, chatId, q.question, {
+          const sentAskMsgId = await sendMessage(ctx.telegram, chatId, q.question, {
             replyToMessageId: messageId,
             replyMarkup: { inline_keyboard: buttons },
           });
           const answer = await registerPendingAsk(askId, {
             question: q.question,
             options: q.options.map(o => o.label),
-          });
+          }, { telegram: ctx.telegram, chatId, sentMessageId: sentAskMsgId });
           return { behavior: "allow" as const, updatedInput: { ...input, answers: answer } };
         } finally {
           flushRef?.resumeTyping();
@@ -411,7 +427,7 @@ async function handleImageMessage(msg: Message, ctx: HandlerContext, fileId: str
     await sendMessage(ctx.telegram, chatId, "Processing your image...", { replyToMessageId: messageId });
     logger.debug(tag, `chat_id=${chatId} message_id=${messageId} caption=${caption}`);
     const imagePath = await downloadAndSaveImage(ctx.telegram, fileId);
-    await handlePrompt(prompt, chatId, messageId, ctx, [imagePath]);
+    await handlePrompt(prompt, chatId, messageId, ctx, [imagePath], false, true);
   } catch (err) {
     logger.error("handler", `Error in handleImageMessage: ${errorMessage(err)}`, err);
     await sendMessage(ctx.telegram, chatId, `Error: ${escapeHtml(errorMessage(err))}`, { replyToMessageId: messageId });
@@ -468,7 +484,7 @@ async function handleVoiceMessage(msg: Message, ctx: HandlerContext): Promise<vo
     }
 
     logger.debug("whisper", `Transcription: ${transcription}`);
-    await handlePrompt(transcription, chatId, messageId, ctx, undefined, true);
+    await handlePrompt(transcription, chatId, messageId, ctx, undefined, true, true);
   } catch (err) {
     logger.error("handler", `Error in handleVoiceMessage: ${errorMessage(err)}`, err);
     await sendMessage(ctx.telegram, chatId, `Error processing voice: ${escapeHtml(errorMessage(err))}`, { replyToMessageId: messageId });
@@ -495,7 +511,6 @@ async function handleNewProject(
   }
 
   const fullPath = path.join(os.homedir(), sanitized);
-  const projectName = path.basename(fullPath);
 
   // Check if final directory already exists
   if (fs.existsSync(fullPath)) {
@@ -519,18 +534,7 @@ async function handleNewProject(
   }
 
   // Stop old session and create new one
-  const oldId = loadActiveSessionId(ctx.sessionsFile);
-  if (oldId) {
-    if (isSessionBusy(oldId)) {
-      suppressSessionMessages(oldId);
-      setSessionAutoAllow(oldId);
-      denyAllPending();
-    } else {
-      resetSessionAutoAllow(oldId);
-      denyAllPending();
-    }
-  }
-
+  stopOldSession(ctx.sessionsFile);
   createNewSession(ctx.sessionsFile, fullPath);
   await sendMessage(ctx.telegram, chatId, `Created project: <code>~/${escapeHtml(sanitized)}</code>`, {
     replyToMessageId: messageId,
@@ -543,13 +547,14 @@ async function handleNewProject(
 }
 
 // ---------- prompt handling ----------
-async function handlePrompt(
+export async function handlePrompt(
   prompt: string,
   chatId: number,
   messageId: number,
   ctx: HandlerContext,
   imagePaths?: string[],
   voiceMode?: boolean,
+  quiet?: boolean,
 ): Promise<void> {
   const sessionId = getOrCreateSessionId(ctx.sessionsFile);
   const sessionCwd = loadSessionCwd(ctx.sessionsFile);
@@ -564,15 +569,20 @@ async function handlePrompt(
 
   // If this session is busy, queue the message
   if (processingTurns.has(sessionId)) {
-    enqueue(sessionId, { prompt: formattedPrompt, chatId, messageId, ctx, voiceMode });
-    if (hasPendingPerms() || hasPendingAsks()) {
-      // Permission/ask dialog open → deny to unblock, queue drains immediately
+    // Pending AskUserQuestion → use text as the answer (don't queue as new prompt)
+    if (hasPendingAsks()) {
+      resolveAsksWithText(typeof formattedPrompt === "string" ? formattedPrompt : prompt);
+      return;
+    }
+    enqueue(sessionId, { prompt: formattedPrompt, chatId, messageId, ctx, voiceMode, quiet });
+    if (hasPendingPerms()) {
+      // Permission dialog open → deny to unblock, queue drains immediately
       denyAllPending();
     }
     return;
   }
 
-  await executePrompt(sessionId, formattedPrompt, chatId, messageId, ctx, voiceMode);
+  await executePrompt(sessionId, formattedPrompt, chatId, messageId, ctx, voiceMode, quiet);
 }
 
 // ---------- streaming response ----------
@@ -583,11 +593,11 @@ interface StreamResult {
 
 async function streamResponse(
   sessionId: string,
-  prompt: string,
+  prompt: MessageContent,
   chatId: number,
   messageId: number,
   ctx: HandlerContext,
-  options: { cwd: string; model?: string; typingHandle?: TypingHandle },
+  options: { cwd: string; model?: string; typingHandle?: TypingHandle; quiet?: boolean },
 ): Promise<StreamResult> {
   const textParts: string[] = [];
   let gotResult = false;
@@ -600,7 +610,7 @@ async function streamResponse(
     flush: async () => {
       if (suppressedSessions.has(sessionId)) return;
       if (textParts.length === 0) return;
-      const text = textParts.join("\n").trim().replace(/<thinking>[\s\S]*?<\/thinking>\s*/g, "").trim();
+      const text = stripThinking(textParts.join("\n"));
       if (!text) return;
       const formatted = tryMdToHtml(text);
       await sendMessage(ctx.telegram, chatId, formatted.text, {
@@ -613,15 +623,17 @@ async function streamResponse(
     resumeTyping: () => options.typingHandle?.resume(),
   };
 
+  const quiet = options.quiet === true;
+
   for await (const msg of querySession(prompt, {
     sessionId,
     cwd: options.cwd,
-    yolo: ctx.yolo || sessionYolo.get(sessionId) === true,
+    yolo: quiet || ctx.yolo || sessionYolo.get(sessionId) === true,
     model: options.model,
     canUseTool: buildCanUseTool(ctx, chatId, messageId, sessionId, flushRef),
   })) {
-    // Skip sending messages if session was switched away
-    const suppressed = suppressedSessions.has(sessionId);
+    // Skip sending messages if session was switched away or in quiet mode
+    const suppressed = suppressedSessions.has(sessionId) || quiet;
 
     if (isSystemInit(msg)) {
       logger.debug("handler", `session init: ${msg.session_id?.slice(0, 8)}`);
@@ -677,7 +689,7 @@ async function sendFinalResponse(
   ctx: HandlerContext,
   voiceMode?: boolean,
 ): Promise<void> {
-  const fullText = textParts.join("\n").trim().replace(/<thinking>[\s\S]*?<\/thinking>\s*/g, "").trim();
+  const fullText = stripThinking(textParts.join("\n"));
   if (!fullText) return;
 
   if (voiceMode) {
@@ -702,11 +714,12 @@ async function sendFinalResponse(
 // ---------- prompt execution orchestrator ----------
 async function executePrompt(
   sessionId: string,
-  prompt: string,
+  prompt: MessageContent,
   chatId: number,
   messageId: number,
   ctx: HandlerContext,
   voiceMode?: boolean,
+  quiet?: boolean,
 ): Promise<void> {
   const cwd = loadSessionCwd(ctx.sessionsFile) || defaultCwd();
   const model = loadModel(ctx.sessionsFile);
@@ -725,14 +738,15 @@ async function executePrompt(
 
   try {
     const { textParts, gotResult } = await streamResponse(
-      sessionId, prompt, chatId, messageId, ctx, { cwd, model, typingHandle },
+      sessionId, prompt, chatId, messageId, ctx, { cwd, model, typingHandle, quiet },
     );
 
     if (!gotResult) return;
 
     // Don't send final response if session was switched away
     if (!suppressedSessions.has(sessionId)) {
-      await sendFinalResponse(textParts, prompt, chatId, messageId, ctx, voiceMode);
+      const promptText = typeof prompt === "string" ? prompt : prompt.filter(b => b.type === "text").map(b => (b as { text: string }).text).join("\n");
+      await sendFinalResponse(textParts, promptText, chatId, messageId, ctx, voiceMode);
     }
   } finally {
     typingHandle.stop();
@@ -771,7 +785,7 @@ async function executePrompt(
       const next = queue!.shift()!;
       if (queue!.length === 0) messageQueue.delete(sessionId);
       // Keep processingTurns set — next executePrompt will manage it
-      executePrompt(sessionId, next.prompt, next.chatId, next.messageId, next.ctx, next.voiceMode).catch(err => {
+      executePrompt(sessionId, next.prompt, next.chatId, next.messageId, next.ctx, next.voiceMode, next.quiet).catch(err => {
         logger.error("handler", `Queue drain error: ${errorMessage(err)}`);
         processingTurns.delete(sessionId);
       });

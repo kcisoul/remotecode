@@ -66,6 +66,7 @@ const pendingAsk = new Map<string, {
   resolve: (answer: Record<string, string>) => void;
   timer: ReturnType<typeof setTimeout>;
   meta?: AskMeta;
+  msgInfo?: PermMsgInfo;
 }>();
 
 export interface PermMeta {
@@ -88,13 +89,13 @@ const pendingPerm = new Map<string, {
 
 const PENDING_TIMEOUT_MS = 300_000; // 5 minutes
 
-export function registerPendingAsk(id: string, meta?: AskMeta): Promise<Record<string, string>> {
+export function registerPendingAsk(id: string, meta?: AskMeta, msgInfo?: PermMsgInfo): Promise<Record<string, string>> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       pendingAsk.delete(id);
       reject(new Error("Timeout waiting for user response"));
     }, PENDING_TIMEOUT_MS);
-    pendingAsk.set(id, { resolve, timer, meta });
+    pendingAsk.set(id, { resolve, timer, meta, msgInfo });
   });
 }
 
@@ -122,6 +123,10 @@ export function denyAllPending(): void {
   for (const [, pending] of pendingAsk) {
     clearTimeout(pending.timer);
     pending.resolve({ answer: "" });
+    if (pending.msgInfo) {
+      silentCatch("callback", "editAskDenied",
+        editMessageText(pending.msgInfo.telegram, pending.msgInfo.chatId, pending.msgInfo.sentMessageId, "Cancelled"));
+    }
   }
   pendingAsk.clear();
 }
@@ -139,6 +144,10 @@ export function allowAllPending(): void {
   for (const [, pending] of pendingAsk) {
     clearTimeout(pending.timer);
     pending.resolve({ answer: "" });
+    if (pending.msgInfo) {
+      silentCatch("callback", "editAskSkipped",
+        editMessageText(pending.msgInfo.telegram, pending.msgInfo.chatId, pending.msgInfo.sentMessageId, "Skipped"));
+    }
   }
   pendingAsk.clear();
 }
@@ -149,6 +158,22 @@ export function hasPendingPerms(): boolean {
 
 export function hasPendingAsks(): boolean {
   return pendingAsk.size > 0;
+}
+
+/** Resolve all pending AskUserQuestion prompts with the given text. Returns true if any were resolved. */
+export function resolveAsksWithText(text: string): boolean {
+  if (pendingAsk.size === 0) return false;
+  for (const [, pending] of pendingAsk) {
+    clearTimeout(pending.timer);
+    pending.resolve({ answer: text });
+    if (pending.msgInfo) {
+      silentCatch("callback", "editAskTextResolve",
+        editMessageText(pending.msgInfo.telegram, pending.msgInfo.chatId, pending.msgInfo.sentMessageId,
+          `Answered: ${escapeHtml(text.length > 200 ? text.slice(0, 200) + "…" : text)}`, { parseMode: "HTML" }));
+    }
+  }
+  pendingAsk.clear();
+  return true;
 }
 
 // ---------- per-session perm-denied flag (prevents queued canUseTool from showing dialogs after deny) ----------
@@ -163,7 +188,7 @@ export function clearPermDenied(sessionId: string): void {
 }
 
 // ---------- stop old session on switch ----------
-function stopOldSession(sessionsFile: string, newSessionId?: string): void {
+export function stopOldSession(sessionsFile: string, newSessionId?: string): void {
   const oldId = loadActiveSessionId(sessionsFile);
   if (oldId && oldId !== newSessionId) {
     if (isSessionBusy(oldId)) {

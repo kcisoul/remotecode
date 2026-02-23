@@ -122,7 +122,7 @@ export function getConfig(): Config {
 /** Tool names whose tool_use messages are not forwarded to Telegram. */
 export const SILENT_TOOLS = new Set([
   "TodoWrite", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet",
-  "TodoRead", "AskUserQuestion",
+  "TodoRead", "AskUserQuestion", "EnterPlanMode", "ExitPlanMode",
 ]);
 
 /** Model choices shown in the /model inline keyboard. */
