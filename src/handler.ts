@@ -114,12 +114,29 @@ function transcribeAudio(audioPath: string): string {
 }
 
 // ---------- typing indicator ----------
-function startTyping(config: TelegramConfig, chatId: number): () => void {
-  silentCatch("typing", "sendChatAction", sendChatAction(config, chatId));
-  const interval = setInterval(() => {
+interface TypingHandle {
+  stop: () => void;
+  pause: () => void;
+  resume: () => void;
+}
+
+function startTyping(config: TelegramConfig, chatId: number): TypingHandle {
+  let interval: ReturnType<typeof setInterval> | null = null;
+
+  const start = () => {
+    if (interval) return;
     silentCatch("typing", "sendChatAction", sendChatAction(config, chatId));
-  }, 4000);
-  return () => clearInterval(interval);
+    interval = setInterval(() => {
+      silentCatch("typing", "sendChatAction", sendChatAction(config, chatId));
+    }, 4000);
+  };
+
+  const stop = () => {
+    if (interval) { clearInterval(interval); interval = null; }
+  };
+
+  start();
+  return { stop, pause: stop, resume: start };
 }
 
 // ---------- per-session auto-allow ----------
@@ -208,9 +225,11 @@ function formatToolDescription(toolName: string, input: Record<string, unknown>)
 }
 
 // ---------- flush reference for canUseTool ----------
-/** Mutable reference that canUseTool uses to flush accumulated text before showing UI. */
+/** Mutable reference that canUseTool uses to flush accumulated text and pause typing before showing UI. */
 export interface FlushRef {
   flush: () => Promise<void>;
+  pauseTyping: () => void;
+  resumeTyping: () => void;
 }
 
 // ---------- canUseTool callback builder ----------
@@ -235,12 +254,18 @@ function buildCanUseTool(ctx: HandlerContext, chatId: number, messageId: number,
           text: opt.label,
           callback_data: `ask:${askId}:${i}:${opt.label}`,
         }]);
-        await sendMessage(ctx.telegram, chatId, q.question, {
-          replyToMessageId: messageId,
-          replyMarkup: { inline_keyboard: buttons },
-        });
-        const answer = await registerPendingAsk(askId);
-        return { behavior: "allow" as const, updatedInput: { ...input, answers: answer } };
+        // Pause typing while waiting for user answer
+        flushRef?.pauseTyping();
+        try {
+          await sendMessage(ctx.telegram, chatId, q.question, {
+            replyToMessageId: messageId,
+            replyMarkup: { inline_keyboard: buttons },
+          });
+          const answer = await registerPendingAsk(askId);
+          return { behavior: "allow" as const, updatedInput: { ...input, answers: answer } };
+        } finally {
+          flushRef?.resumeTyping();
+        }
       }
     }
 
@@ -282,18 +307,24 @@ function buildCanUseTool(ctx: HandlerContext, chatId: number, messageId: number,
           { text: "Yolo for session", callback_data: `perm:${permId}:yolo` },
         ],
       ];
-      const sentMsgId = await sendMessage(ctx.telegram, chatId, reason, {
-        replyToMessageId: messageId,
-        parseMode: "HTML",
-        replyMarkup: { inline_keyboard: buttons },
-      });
-      const result = await registerPendingPerm(permId, { sessionId, toolName }, {
-        telegram: ctx.telegram, chatId, sentMessageId: sentMsgId,
-      });
-      if (result === "allow" || result === "allowall") {
-        return { behavior: "allow" as const, updatedInput: input };
+      // Pause typing while waiting for permission response
+      flushRef?.pauseTyping();
+      try {
+        const sentMsgId = await sendMessage(ctx.telegram, chatId, reason, {
+          replyToMessageId: messageId,
+          parseMode: "HTML",
+          replyMarkup: { inline_keyboard: buttons },
+        });
+        const result = await registerPendingPerm(permId, { sessionId, toolName }, {
+          telegram: ctx.telegram, chatId, sentMessageId: sentMsgId,
+        });
+        if (result === "allow" || result === "allowall") {
+          return { behavior: "allow" as const, updatedInput: input };
+        }
+        return { behavior: "deny" as const, message: "User denied", interrupt: true };
+      } finally {
+        flushRef?.resumeTyping();
       }
-      return { behavior: "deny" as const, message: "User denied", interrupt: true };
     } finally {
       releaseGate();
     }
@@ -540,13 +571,15 @@ async function streamResponse(
   chatId: number,
   messageId: number,
   ctx: HandlerContext,
-  options: { cwd: string; model?: string },
+  options: { cwd: string; model?: string; typingHandle?: TypingHandle },
 ): Promise<StreamResult> {
   const textParts: string[] = [];
   let gotResult = false;
 
   // Mutable flush ref: canUseTool calls this to send accumulated text
   // before showing interactive UI (e.g. AskUserQuestion keyboard).
+  // Also exposes typing pause/resume so we stop "typing..." while
+  // waiting for user interaction (AskUserQuestion, perm dialogs).
   const flushRef: FlushRef = {
     flush: async () => {
       if (suppressedSessions.has(sessionId)) return;
@@ -560,6 +593,8 @@ async function streamResponse(
       });
       textParts.length = 0;
     },
+    pauseTyping: () => options.typingHandle?.pause(),
+    resumeTyping: () => options.typingHandle?.resume(),
   };
 
   for await (const msg of querySession(prompt, {
@@ -670,11 +705,11 @@ async function executePrompt(
   clearPermDenied(sessionId);
   processingTurns.add(sessionId);
   activeQueries.add(sessionId);
-  const stopTyping = startTyping(ctx.telegram, chatId);
+  const typingHandle = startTyping(ctx.telegram, chatId);
 
   try {
     const { textParts, gotResult } = await streamResponse(
-      sessionId, prompt, chatId, messageId, ctx, { cwd, model },
+      sessionId, prompt, chatId, messageId, ctx, { cwd, model, typingHandle },
     );
 
     if (!gotResult) return;
@@ -684,7 +719,7 @@ async function executePrompt(
       await sendFinalResponse(textParts, prompt, chatId, messageId, ctx, voiceMode);
     }
   } finally {
-    stopTyping();
+    typingHandle.stop();
     skipToEnd();
     suppressedSessions.delete(sessionId);
 
