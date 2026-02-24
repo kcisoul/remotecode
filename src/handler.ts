@@ -9,6 +9,8 @@ import {
   TelegramConfig,
   Message,
   sendMessage,
+  editMessageText,
+  deleteMessage,
   sendChatAction,
   downloadFile,
 } from "./telegram";
@@ -218,26 +220,67 @@ export function isSessionBusy(sessionId: string): boolean {
 }
 
 // ---------- tool description formatting ----------
-function formatToolDescription(toolName: string, input: Record<string, unknown>): string {
+function formatToolDetail(toolName: string, input: Record<string, unknown>): string {
   const e = escapeHtml;
   switch (toolName) {
     case "Bash":
-      return `<b>Bash:</b> <code>${e(String(input.command || "").slice(0, 200))}</code>`;
+      return `${e(String(input.command || "").slice(0, 200))}`;
     case "Edit":
-      return `<b>Edit:</b> <code>${e(String(input.file_path || ""))}</code>`;
     case "Write":
-      return `<b>Write:</b> <code>${e(String(input.file_path || ""))}</code>`;
     case "Read":
-      return `<b>Read:</b> <code>${e(String(input.file_path || ""))}</code>`;
+      return `${e(String(input.file_path || ""))}`;
     case "Glob":
-      return `<b>Glob:</b> <code>${e(String(input.pattern || ""))}</code>`;
     case "Grep":
-      return `<b>Grep:</b> <code>${e(String(input.pattern || ""))}</code>`;
+      return `${e(String(input.pattern || ""))}`;
     case "Task":
-      return `<b>Task:</b> ${e(String(input.description || ""))}`;
+      return `${e(String(input.description || ""))}`;
+    case "WebSearch":
+      return `${e(String(input.query || "").slice(0, 200))}`;
+    case "WebFetch":
+      return `${e(String(input.url || "").slice(0, 200))}`;
+    case "NotebookEdit":
+      return `${e(String(input.notebook_path || ""))}`;
+    case "Skill":
+      return `${e(String(input.skill || ""))}`;
     default:
-      return `<b>${e(toolName)}</b>`;
+      return "";
   }
+}
+
+function detectBashLang(command: string): string {
+  const cmd = command.trimStart();
+  if (/^python[23]?\s/.test(cmd)) return "python";
+  if (/^node\s/.test(cmd)) return "javascript";
+  if (/^ruby\s/.test(cmd)) return "ruby";
+  if (/^go\s/.test(cmd)) return "go";
+  if (/^cargo\s|^rustc\s/.test(cmd)) return "rust";
+  if (/^swift\s|^swiftc\s/.test(cmd)) return "swift";
+  if (/^java\s|^javac\s|^gradle\s|^mvn\s/.test(cmd)) return "java";
+  return "bash";
+}
+
+function toolLanguage(toolName: string, input: Record<string, unknown>): string {
+  switch (toolName) {
+    case "Bash": return detectBashLang(String(input.command || ""));
+    case "Edit":
+    case "Write":
+    case "Read":
+    case "Glob":
+    case "Grep": return "bash";
+    case "WebSearch":
+    case "WebFetch": return "bash";
+    case "Task": return "bash";
+    default: return "bash";
+  }
+}
+
+function formatToolDescription(toolName: string, input: Record<string, unknown>): string {
+  const lang = toolLanguage(toolName, input);
+  const detail = formatToolDetail(toolName, input);
+  if (detail) {
+    return `<pre><code class="language-${lang}">${escapeHtml(toolName)}: ${detail}</code></pre>`;
+  }
+  return `<pre><code class="language-${lang}">${escapeHtml(toolName)}</code></pre>`;
 }
 
 // ---------- flush reference for canUseTool ----------
@@ -248,12 +291,24 @@ export interface FlushRef {
   resumeTyping: () => void;
 }
 
+/** Mutable reference to the current tool description message so permission results can be appended to it. */
+export interface ToolMsgRef {
+  /** Append a status line (e.g. "✓ Allowed Bash") to the specific tool block identified by toolUseId */
+  appendStatus: (toolUseId: string, status: string) => Promise<void>;
+}
+
+interface ToolBlock {
+  toolUseId: string;
+  desc: string;
+  status?: string;
+}
+
 // ---------- canUseTool callback builder ----------
-function buildCanUseTool(ctx: HandlerContext, chatId: number, messageId: number, sessionId: string, flushRef?: FlushRef): CanUseToolFn {
+function buildCanUseTool(ctx: HandlerContext, chatId: number, messageId: number, sessionId: string, flushRef?: FlushRef, toolMsgRef?: ToolMsgRef): CanUseToolFn {
   // Serialize permission dialogs so only one is shown at a time
   let permGate: Promise<void> = Promise.resolve();
 
-  return async (toolName, input, { decisionReason }) => {
+  return async (toolName, input, { decisionReason, toolUseID }) => {
     // Guard: if session was suppressed (switched away), auto-allow without UI
     if (suppressedSessions.has(sessionId)) {
       return { behavior: "allow" as const, updatedInput: input };
@@ -350,9 +405,13 @@ function buildCanUseTool(ctx: HandlerContext, chatId: number, messageId: number,
         const result = await registerPendingPerm(permId, { sessionId, toolName }, {
           telegram: ctx.telegram, chatId, sentMessageId: sentMsgId,
         });
+        // Delete the permission dialog and append status to tool message
+        deleteMessage(ctx.telegram, chatId, sentMsgId).catch(() => {});
         if (result === "allow" || result === "allowall") {
+          if (toolMsgRef) await toolMsgRef.appendStatus(toolUseID, `✓ Allowed ${escapeHtml(toolName)}`);
           return { behavior: "allow" as const, updatedInput: input };
         }
+        if (toolMsgRef) await toolMsgRef.appendStatus(toolUseID, `✗ Denied ${escapeHtml(toolName)}`);
         return { behavior: "deny" as const, message: "User denied", interrupt: true };
       } finally {
         flushRef?.resumeTyping();
@@ -602,6 +661,20 @@ async function streamResponse(
   const textParts: string[] = [];
   let gotResult = false;
 
+  // Track the last tool description message so sequential tool_use
+  // blocks are edited into the same Telegram message instead of spamming.
+  let toolMsgId: number | null = null;
+  let toolBlocks: ToolBlock[] = [];
+
+  function resetToolMsg(): void {
+    toolMsgId = null;
+    toolBlocks = [];
+  }
+
+  function renderToolBlocks(): string {
+    return toolBlocks.map(b => b.status ? `${b.desc}\n${b.status}` : b.desc).join("\n");
+  }
+
   // Mutable flush ref: canUseTool calls this to send accumulated text
   // before showing interactive UI (e.g. AskUserQuestion keyboard).
   // Also exposes typing pause/resume so we stop "typing..." while
@@ -623,6 +696,19 @@ async function streamResponse(
     resumeTyping: () => options.typingHandle?.resume(),
   };
 
+  // Mutable ref so canUseTool can append permission status to the tool description message
+  const toolMsgRef: ToolMsgRef = {
+    appendStatus: async (toolUseId: string, status: string) => {
+      if (!toolMsgId) return;
+      const block = toolBlocks.find(b => b.toolUseId === toolUseId);
+      if (block) {
+        block.status = status;
+      }
+      const rendered = renderToolBlocks();
+      await editMessageText(ctx.telegram, chatId, toolMsgId, rendered, { parseMode: "HTML" }).catch(() => {});
+    },
+  };
+
   const quiet = options.quiet === true;
 
   for await (const msg of querySession(prompt, {
@@ -630,7 +716,7 @@ async function streamResponse(
     cwd: options.cwd,
     yolo: quiet || ctx.yolo || sessionYolo.get(sessionId) === true,
     model: options.model,
-    canUseTool: buildCanUseTool(ctx, chatId, messageId, sessionId, flushRef),
+    canUseTool: buildCanUseTool(ctx, chatId, messageId, sessionId, flushRef, toolMsgRef),
   })) {
     // Skip sending messages if session was switched away or in quiet mode
     const suppressed = suppressedSessions.has(sessionId) || quiet;
@@ -640,13 +726,35 @@ async function streamResponse(
     }
 
     if (isAssistantMessage(msg)) {
+      const newBlocks: ToolBlock[] = [];
+      let hasText = false;
       for (const block of msg.message.content) {
         if (block.type === "text" && "text" in block) {
           textParts.push(block.text);
+          hasText = true;
         }
         if (!suppressed && block.type === "tool_use" && "name" in block && !SILENT_TOOLS.has(block.name)) {
-          const desc = formatToolDescription(block.name, (block as { input?: Record<string, unknown> }).input || {});
-          await sendMessage(ctx.telegram, chatId, desc, {
+          newBlocks.push({
+            toolUseId: (block as { id?: string }).id || crypto.randomUUID().slice(0, 8),
+            desc: formatToolDescription(block.name, (block as { input?: Record<string, unknown> }).input || {}),
+          });
+        }
+      }
+      // Reset tool message tracker when new text appears (new response phase)
+      if (hasText) resetToolMsg();
+      if (newBlocks.length > 0) {
+        toolBlocks.push(...newBlocks);
+        const rendered = renderToolBlocks();
+        if (toolMsgId) {
+          // Update existing tool message via edit
+          await editMessageText(ctx.telegram, chatId, toolMsgId, rendered, { parseMode: "HTML" }).catch(() => {
+            // Edit may fail (e.g. message too old); fall back to new message
+            toolMsgId = null;
+          });
+        }
+        if (!toolMsgId) {
+          // Send new tool message
+          toolMsgId = await sendMessage(ctx.telegram, chatId, rendered, {
             replyToMessageId: messageId,
             parseMode: "HTML",
           });
@@ -670,6 +778,7 @@ async function streamResponse(
 
     if (isResult(msg)) {
       gotResult = true;
+      resetToolMsg();
       if (!suppressed && isResultError(msg) && msg.errors && !wasSessionInterrupted(sessionId)) {
         const errText = msg.errors.join("\n");
         await sendMessage(ctx.telegram, chatId, `Error: ${escapeHtml(errText)}`, { replyToMessageId: messageId });
