@@ -325,21 +325,20 @@ async function handlePermCallback(
 
     if (decision === "tool") {
       setSessionToolAllow(sessionId, toolName);
-      label = `Allowed ${toolName} for session`;
       pending.resolve("allow");
     } else if (decision === "yolo") {
       setSessionAutoAllow(sessionId);
-      label = "Yolo for session";
       pending.resolve("allow");
     } else if (decision === "allow") {
-      label = "Allowed";
       pending.resolve("allow");
     } else {
-      label = "Denied";
       pending.resolve("deny");
     }
+    // Message deletion + status append is handled by handler's canUseTool
+    return;
   }
 
+  // Orphaned callback (no pending entry) — just clean up the message
   silentCatch("callback", "editPermResponse", editMessageText(ctx.telegram, chatId, messageId, label));
 }
 

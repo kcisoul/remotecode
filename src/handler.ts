@@ -295,12 +295,15 @@ export interface FlushRef {
 export interface ToolMsgRef {
   /** Append a status line (e.g. "✓ Allowed Bash") to the specific tool block identified by toolUseId */
   appendStatus: (toolUseId: string, status: string) => Promise<void>;
+  /** Make a hidden tool block visible and update the Telegram message */
+  revealBlock: (toolUseId: string) => Promise<void>;
 }
 
 interface ToolBlock {
   toolUseId: string;
   desc: string;
   status?: string;
+  visible: boolean;
 }
 
 // ---------- canUseTool callback builder ----------
@@ -353,12 +356,14 @@ function buildCanUseTool(ctx: HandlerContext, chatId: number, messageId: number,
 
     // 2) Yolo mode or session yolo → auto-allow everything
     if (ctx.yolo || sessionYolo.get(sessionId)) {
+      if (toolMsgRef) await toolMsgRef.revealBlock(toolUseID);
       return { behavior: "allow" as const, updatedInput: input };
     }
 
     // 3) Per-tool session allow
     const allowedTools = sessionAutoAllowTools.get(sessionId);
     if (allowedTools?.has(toolName)) {
+      if (toolMsgRef) await toolMsgRef.revealBlock(toolUseID);
       return { behavior: "allow" as const, updatedInput: input };
     }
 
@@ -375,8 +380,22 @@ function buildCanUseTool(ctx: HandlerContext, chatId: number, messageId: number,
         return { behavior: "deny" as const, message: "Session interrupted", interrupt: true };
       }
 
+      // Re-check yolo/tool-allow in case it was set while queued (e.g. "Yolo for session" button)
+      if (ctx.yolo || sessionYolo.get(sessionId)) {
+        if (toolMsgRef) await toolMsgRef.revealBlock(toolUseID);
+        return { behavior: "allow" as const, updatedInput: input };
+      }
+      const allowedToolsRecheck = sessionAutoAllowTools.get(sessionId);
+      if (allowedToolsRecheck?.has(toolName)) {
+        if (toolMsgRef) await toolMsgRef.revealBlock(toolUseID);
+        return { behavior: "allow" as const, updatedInput: input };
+      }
+
       // Flush accumulated text so user sees tool context before the dialog
       if (flushRef) await flushRef.flush();
+
+      // Reveal this tool block now that it's this tool's turn for permission
+      if (toolMsgRef) await toolMsgRef.revealBlock(toolUseID);
 
       const permId = crypto.randomUUID().slice(0, 8);
       const reason = decisionReason
@@ -672,7 +691,10 @@ async function streamResponse(
   }
 
   function renderToolBlocks(): string {
-    return toolBlocks.map(b => b.status ? `${b.desc}\n${b.status}` : b.desc).join("\n");
+    return toolBlocks
+      .filter(b => b.visible)
+      .map(b => b.status ? `${b.desc}\n${b.status}` : b.desc)
+      .join("\n");
   }
 
   // Mutable flush ref: canUseTool calls this to send accumulated text
@@ -696,25 +718,63 @@ async function streamResponse(
     resumeTyping: () => options.typingHandle?.resume(),
   };
 
-  // Mutable ref so canUseTool can append permission status to the tool description message
+  // Mutable ref so canUseTool can append permission status to the tool description message.
+  // editLock serializes Telegram message edits to prevent race conditions when multiple
+  // auto-allowed tools reveal concurrently.
+  let editLock: Promise<void> = Promise.resolve();
+
   const toolMsgRef: ToolMsgRef = {
     appendStatus: async (toolUseId: string, status: string) => {
-      if (!toolMsgId) return;
-      const block = toolBlocks.find(b => b.toolUseId === toolUseId);
-      if (block) {
-        block.status = status;
+      const prev = editLock;
+      let release!: () => void;
+      editLock = new Promise(r => { release = r; });
+      try {
+        await prev;
+        if (!toolMsgId) return;
+        const block = toolBlocks.find(b => b.toolUseId === toolUseId);
+        if (block) {
+          block.status = status;
+        }
+        const rendered = renderToolBlocks();
+        if (rendered) {
+          await editMessageText(ctx.telegram, chatId, toolMsgId, rendered, { parseMode: "HTML" }).catch(() => {});
+        }
+      } finally {
+        release();
       }
-      const rendered = renderToolBlocks();
-      await editMessageText(ctx.telegram, chatId, toolMsgId, rendered, { parseMode: "HTML" }).catch(() => {});
+    },
+    revealBlock: async (toolUseId: string) => {
+      const prev = editLock;
+      let release!: () => void;
+      editLock = new Promise(r => { release = r; });
+      try {
+        await prev;
+        const block = toolBlocks.find(b => b.toolUseId === toolUseId);
+        if (!block || block.visible) return;
+        block.visible = true;
+        const rendered = renderToolBlocks();
+        if (!rendered) return;
+        if (toolMsgId) {
+          await editMessageText(ctx.telegram, chatId, toolMsgId, rendered, { parseMode: "HTML" }).catch(() => {});
+        } else {
+          toolMsgId = await sendMessage(ctx.telegram, chatId, rendered, {
+            replyToMessageId: messageId,
+            parseMode: "HTML",
+          });
+        }
+      } finally {
+        release();
+      }
     },
   };
 
   const quiet = options.quiet === true;
+  const isYolo = quiet || ctx.yolo || sessionYolo.get(sessionId) === true;
 
   for await (const msg of querySession(prompt, {
     sessionId,
     cwd: options.cwd,
-    yolo: quiet || ctx.yolo || sessionYolo.get(sessionId) === true,
+    yolo: isYolo,
     model: options.model,
     canUseTool: buildCanUseTool(ctx, chatId, messageId, sessionId, flushRef, toolMsgRef),
   })) {
@@ -737,27 +797,38 @@ async function streamResponse(
           newBlocks.push({
             toolUseId: (block as { id?: string }).id || crypto.randomUUID().slice(0, 8),
             desc: formatToolDescription(block.name, (block as { input?: Record<string, unknown> }).input || {}),
+            visible: isYolo,
           });
         }
       }
-      // Reset tool message tracker when new text appears (new response phase)
-      if (hasText) resetToolMsg();
+      // Reset tool message tracker when new text appears (new response phase).
+      // In non-yolo mode canUseTool manages the tool message exclusively,
+      // so only reset on hasText when yolo (streaming handler owns the message).
+      if (hasText && isYolo) resetToolMsg();
       if (newBlocks.length > 0) {
-        toolBlocks.push(...newBlocks);
-        const rendered = renderToolBlocks();
-        if (toolMsgId) {
-          // Update existing tool message via edit
-          await editMessageText(ctx.telegram, chatId, toolMsgId, rendered, { parseMode: "HTML" }).catch(() => {
-            // Edit may fail (e.g. message too old); fall back to new message
-            toolMsgId = null;
-          });
+        // Deduplicate: SDK streaming may re-yield the same tool_use blocks
+        for (const nb of newBlocks) {
+          if (!toolBlocks.some(b => b.toolUseId === nb.toolUseId)) {
+            toolBlocks.push(nb);
+          }
         }
-        if (!toolMsgId) {
-          // Send new tool message
-          toolMsgId = await sendMessage(ctx.telegram, chatId, rendered, {
-            replyToMessageId: messageId,
-            parseMode: "HTML",
-          });
+        // Only send/edit tool message from streaming handler in yolo mode.
+        // In non-yolo mode, canUseTool reveals blocks via toolMsgRef.
+        if (isYolo) {
+          const rendered = renderToolBlocks();
+          if (rendered) {
+            if (toolMsgId) {
+              await editMessageText(ctx.telegram, chatId, toolMsgId, rendered, { parseMode: "HTML" }).catch(() => {
+                toolMsgId = null;
+              });
+            }
+            if (!toolMsgId) {
+              toolMsgId = await sendMessage(ctx.telegram, chatId, rendered, {
+                replyToMessageId: messageId,
+                parseMode: "HTML",
+              });
+            }
+          }
         }
       }
     }

@@ -99,7 +99,16 @@ function processNewData(telegram: TelegramConfig, chatId: number): void {
     }
 
     const msgObj = entry.message as Record<string, unknown> | undefined;
-    const text = extractMessageContent(msgObj?.content).trim();
+    const content = msgObj?.content;
+
+    // Skip assistant messages that contain tool_use blocks (tool preamble noise + permission-like text)
+    if (type === "assistant" && Array.isArray(content)) {
+      const hasToolUse = content.some((b: unknown) =>
+        b && typeof b === "object" && (b as Record<string, unknown>).type === "tool_use");
+      if (hasToolUse) continue;
+    }
+
+    const text = extractMessageContent(content).trim();
     if (!text) continue;
 
     const cleaned = text.replace(/<thinking>[\s\S]*?<\/thinking>\s*/g, "").trim();
