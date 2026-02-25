@@ -39,6 +39,12 @@ import {
   type QueuedMessage,
 } from "./session-state";
 
+// ---------- SDK error message rewriting ----------
+/** Rewrite SDK error messages that reference CLI commands (e.g. /login) which don't exist in Telegram. */
+function rewriteSdkError(text: string): string {
+  return text.replace(/Please run \/login/g, "For security, login is not supported via Telegram. Please run `claude login` in Claude Code CLI");
+}
+
 // ---------- unauthorized tracking ----------
 const warnedUsers = new Set<string>();
 
@@ -321,7 +327,7 @@ async function handleTextMessage(msg: Message, ctx: HandlerContext): Promise<voi
     await handlePrompt(text, chatId, messageId, ctx);
   } catch (err) {
     logger.error("handler", `Error in handleTextMessage: ${errorMessage(err)}`, err);
-    await sendMessage(ctx.telegram, chatId, `Error: ${escapeHtml(errorMessage(err))}`, { replyToMessageId: messageId });
+    await sendMessage(ctx.telegram, chatId, `Error: ${escapeHtml(rewriteSdkError(errorMessage(err)))}`, { replyToMessageId: messageId });
   }
 }
 
@@ -344,7 +350,7 @@ async function handleImageMessage(msg: Message, ctx: HandlerContext, fileId: str
     await handlePrompt(prompt, chatId, messageId, ctx, [imagePath], false, true);
   } catch (err) {
     logger.error("handler", `Error in handleImageMessage: ${errorMessage(err)}`, err);
-    await sendMessage(ctx.telegram, chatId, `Error: ${escapeHtml(errorMessage(err))}`, { replyToMessageId: messageId });
+    await sendMessage(ctx.telegram, chatId, `Error: ${escapeHtml(rewriteSdkError(errorMessage(err)))}`, { replyToMessageId: messageId });
   }
 }
 
@@ -690,7 +696,7 @@ async function streamResponse(
       gotResult = true;
       resetToolMsg();
       if (!suppressed && isResultError(msg) && msg.errors && !wasSessionInterrupted(sessionId)) {
-        const errText = msg.errors.join("\n");
+        const errText = rewriteSdkError(msg.errors.join("\n"));
         await sendMessage(ctx.telegram, chatId, `Error: ${escapeHtml(errText)}`, { replyToMessageId: messageId });
       }
     }
