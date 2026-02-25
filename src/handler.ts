@@ -35,6 +35,7 @@ import {
   setCleanupTimeout, clearCleanupTimeout,
   enqueue, hasQueuedMessages, drainNext,
   markProcessing, clearProcessing, isSessionBusy,
+  updateReplyTarget, getReplyTarget, clearReplyTarget,
   type QueuedMessage,
 } from "./session-state";
 
@@ -485,6 +486,7 @@ export async function handlePrompt(
     // Pending AskUserQuestion → use text as the answer (don't queue as new prompt)
     if (hasPendingAsks()) {
       resolveAsksWithText(typeof formattedPrompt === "string" ? formattedPrompt : prompt);
+      updateReplyTarget(sessionId, messageId);
       return;
     }
     enqueue(sessionId, { prompt: formattedPrompt, chatId, messageId, ctx, voiceMode, quiet });
@@ -514,6 +516,8 @@ async function streamResponse(
 ): Promise<StreamResult> {
   const textParts: string[] = [];
   let gotResult = false;
+  // Mutable reply target: updated when user answers AskUserQuestion via text
+  const getReplyId = () => getReplyTarget(sessionId) ?? messageId;
 
   // Track the last tool description message so sequential tool_use
   // blocks are edited into the same Telegram message instead of spamming.
@@ -544,7 +548,7 @@ async function streamResponse(
       if (!text) return;
       const formatted = tryMdToHtml(text);
       await sendMessage(ctx.telegram, chatId, formatted.text, {
-        replyToMessageId: messageId,
+        replyToMessageId: getReplyId(),
         parseMode: formatted.parseMode,
       });
       textParts.length = 0;
@@ -756,13 +760,15 @@ async function executePrompt(
 
     // Don't send final response if session was switched away
     if (!isSessionSuppressed(sessionId)) {
+      const replyId = getReplyTarget(sessionId) ?? messageId;
       const promptText = typeof prompt === "string" ? prompt : prompt.filter(b => b.type === "text").map(b => (b as { text: string }).text).join("\n");
-      await sendFinalResponse(textParts, promptText, chatId, messageId, ctx, voiceMode);
+      await sendFinalResponse(textParts, promptText, chatId, replyId, ctx, voiceMode);
     }
   } finally {
     typingHandle.stop();
     skipToEnd();
     clearSuppression(sessionId);
+    clearReplyTarget(sessionId);
 
     // Delay watcher guard removal to let SDK finish writing to JSONL.
     const sid = sessionId;

@@ -115,3 +115,18 @@ export function markProcessing(sessionId: string): void {
 export function clearProcessing(sessionId: string): void {
   processingTurns.delete(sessionId);
 }
+
+// ---------- reply target override (for text-typed ask answers) ----------
+const replyTargets = new Map<string, number>();
+
+export function updateReplyTarget(sessionId: string, messageId: number): void {
+  replyTargets.set(sessionId, messageId);
+}
+
+export function getReplyTarget(sessionId: string): number | undefined {
+  return replyTargets.get(sessionId);
+}
+
+export function clearReplyTarget(sessionId: string): void {
+  replyTargets.delete(sessionId);
+}
