@@ -2,7 +2,6 @@ import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
-import { spawnSync } from "child_process";
 import { v4 as uuidv4 } from "uuid";
 
 import {
@@ -15,23 +14,29 @@ import {
   downloadFile,
 } from "./telegram";
 import { querySession, closeSession, wasSessionInterrupted, type CanUseToolFn, type MessageContent } from "./claude";
-import { mdToTelegramHtml, escapeHtml, tryMdToHtml, truncateMessage, stripThinking } from "./format";
+import { mdToTelegramHtml, escapeHtml, tryMdToHtml, truncateMessage, stripThinking, formatToolDescription } from "./format";
 import { logger, errorMessage, silentCatch, silentTry } from "./logger";
 import { defaultCwd, whisperModelPath, SILENT_TOOLS } from "./config";
 import {
   getOrCreateSessionId,
   loadSessionCwd,
-  loadActiveSessionId,
   loadModel,
   createNewSession,
 } from "./sessions";
 import { sessionsReplyKeyboard } from "./session-ui";
 import { handleCommand } from "./commands";
 import { HandlerContext, isUserAllowed, activeQueries } from "./context";
-import { registerPendingAsk, registerPendingPerm, denyAllPending, hasPendingPerms, hasPendingAsks, resolveAsksWithText, consumePendingInput, isPermDenied, clearPermDenied, stopOldSession, type PermMeta } from "./callbacks";
-import { isSttReady, isMacOS, checkSttStatus } from "./stt";
+import { registerPendingAsk, registerPendingPerm, denyAllPending, hasPendingPerms, hasPendingAsks, resolveAsksWithText, consumePendingInput, isPermDenied, clearPermDenied, stopOldSession } from "./callbacks";
+import { isSttReady, isMacOS, transcribeAudio } from "./stt";
 import { skipToEnd } from "./watcher";
 import { isAssistantMessage, isSystemInit, isTaskStarted, isTaskNotification, isResult, isResultError } from "./sdk-types";
+import {
+  isSessionYolo, isToolAllowed, isSessionSuppressed, clearSuppression,
+  setCleanupTimeout, clearCleanupTimeout,
+  enqueue, hasQueuedMessages, drainNext,
+  markProcessing, clearProcessing, isSessionBusy,
+  type QueuedMessage,
+} from "./session-state";
 
 // ---------- unauthorized tracking ----------
 const warnedUsers = new Set<string>();
@@ -92,44 +97,6 @@ function isImageDocument(doc?: { mime_type?: string }): boolean {
   return (doc.mime_type || "").toLowerCase().startsWith("image/");
 }
 
-// ---------- whisper transcription ----------
-function convertToWav(inputPath: string): string {
-  const wavPath = inputPath.replace(/\.[^.]+$/, "") + ".wav";
-  const result = spawnSync("ffmpeg", [
-    "-y", "-i", inputPath, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wavPath,
-  ], { timeout: 30000, stdio: ["pipe", "pipe", "pipe"] });
-  if (result.error) throw result.error;
-  if (result.status !== 0) {
-    throw new Error(`ffmpeg exited with code ${result.status}: ${result.stderr?.toString("utf-8").slice(0, 200)}`);
-  }
-  return wavPath;
-}
-
-function transcribeAudio(audioPath: string): string {
-  let wavPath = audioPath;
-  if (!audioPath.toLowerCase().endsWith(".wav")) {
-    wavPath = convertToWav(audioPath);
-  }
-
-  try {
-    const modelPath = whisperModelPath();
-    const whisperBin = checkSttStatus().whisperCli || "whisper-cli";
-    logger.debug("whisper", `transcribing: ${wavPath} (bin: ${whisperBin})`);
-    const result = spawnSync(whisperBin, [
-      "-m", modelPath, "-l", "auto", "--no-timestamps", "--no-prints", "-f", wavPath,
-    ], { timeout: 60000, stdio: ["pipe", "pipe", "pipe"] });
-    if (result.error) throw result.error;
-    if (result.status !== 0) {
-      throw new Error(`whisper exited with code ${result.status}: ${result.stderr?.toString("utf-8").slice(0, 200)}`);
-    }
-    return result.stdout.toString("utf-8").trim();
-  } finally {
-    if (wavPath !== audioPath) {
-      silentTry("whisper", "cleanup wav", () => fs.unlinkSync(wavPath));
-    }
-  }
-}
-
 // ---------- typing indicator ----------
 interface TypingHandle {
   stop: () => void;
@@ -154,133 +121,6 @@ function startTyping(config: TelegramConfig, chatId: number): TypingHandle {
 
   start();
   return { stop, pause: stop, resume: start };
-}
-
-// ---------- per-session auto-allow ----------
-const sessionAutoAllowTools = new Map<string, Set<string>>();
-const sessionYolo = new Map<string, boolean>();
-
-export function resetSessionAutoAllow(sessionId: string): void {
-  sessionAutoAllowTools.delete(sessionId);
-  sessionYolo.delete(sessionId);
-}
-
-export function setSessionAutoAllow(sessionId: string): void {
-  sessionYolo.set(sessionId, true);
-}
-
-export function setSessionToolAllow(sessionId: string, toolName: string): void {
-  let tools = sessionAutoAllowTools.get(sessionId);
-  if (!tools) {
-    tools = new Set();
-    sessionAutoAllowTools.set(sessionId, tools);
-  }
-  tools.add(toolName);
-}
-
-// ---------- session message suppression (for session switch) ----------
-const suppressedSessions = new Set<string>();
-
-export function suppressSessionMessages(sessionId: string): void {
-  suppressedSessions.add(sessionId);
-}
-
-export function unsuppressSessionMessages(sessionId: string): void {
-  suppressedSessions.delete(sessionId);
-}
-
-// ---------- query cleanup timeouts (prevent stale guard removal) ----------
-const queryCleanupTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
-
-// ---------- message queue ----------
-interface QueuedMessage {
-  prompt: MessageContent;
-  chatId: number;
-  messageId: number;
-  ctx: HandlerContext;
-  voiceMode?: boolean;
-  quiet?: boolean;
-}
-
-const messageQueue = new Map<string, QueuedMessage[]>();
-const processingTurns = new Set<string>();
-
-function enqueue(sessionId: string, msg: QueuedMessage): void {
-  const queue = messageQueue.get(sessionId) ?? [];
-  queue.push(msg);
-  messageQueue.set(sessionId, queue);
-}
-
-export function clearQueue(sessionId: string): void {
-  messageQueue.delete(sessionId);
-}
-
-export function isSessionBusy(sessionId: string): boolean {
-  return processingTurns.has(sessionId);
-}
-
-// ---------- tool description formatting ----------
-function formatToolDetail(toolName: string, input: Record<string, unknown>): string {
-  const e = escapeHtml;
-  switch (toolName) {
-    case "Bash":
-      return `${e(String(input.command || "").slice(0, 200))}`;
-    case "Edit":
-    case "Write":
-    case "Read":
-      return `${e(String(input.file_path || ""))}`;
-    case "Glob":
-    case "Grep":
-      return `${e(String(input.pattern || ""))}`;
-    case "Task":
-      return `${e(String(input.description || ""))}`;
-    case "WebSearch":
-      return `${e(String(input.query || "").slice(0, 200))}`;
-    case "WebFetch":
-      return `${e(String(input.url || "").slice(0, 200))}`;
-    case "NotebookEdit":
-      return `${e(String(input.notebook_path || ""))}`;
-    case "Skill":
-      return `${e(String(input.skill || ""))}`;
-    default:
-      return "";
-  }
-}
-
-function detectBashLang(command: string): string {
-  const cmd = command.trimStart();
-  if (/^python[23]?\s/.test(cmd)) return "python";
-  if (/^node\s/.test(cmd)) return "javascript";
-  if (/^ruby\s/.test(cmd)) return "ruby";
-  if (/^go\s/.test(cmd)) return "go";
-  if (/^cargo\s|^rustc\s/.test(cmd)) return "rust";
-  if (/^swift\s|^swiftc\s/.test(cmd)) return "swift";
-  if (/^java\s|^javac\s|^gradle\s|^mvn\s/.test(cmd)) return "java";
-  return "bash";
-}
-
-function toolLanguage(toolName: string, input: Record<string, unknown>): string {
-  switch (toolName) {
-    case "Bash": return detectBashLang(String(input.command || ""));
-    case "Edit":
-    case "Write":
-    case "Read":
-    case "Glob":
-    case "Grep": return "bash";
-    case "WebSearch":
-    case "WebFetch": return "bash";
-    case "Task": return "bash";
-    default: return "bash";
-  }
-}
-
-function formatToolDescription(toolName: string, input: Record<string, unknown>): string {
-  const lang = toolLanguage(toolName, input);
-  const detail = formatToolDetail(toolName, input);
-  if (detail) {
-    return `<pre><code class="language-${lang}">${escapeHtml(toolName)}: ${detail}</code></pre>`;
-  }
-  return `<pre><code class="language-${lang}">${escapeHtml(toolName)}</code></pre>`;
 }
 
 // ---------- flush reference for canUseTool ----------
@@ -312,8 +152,14 @@ function buildCanUseTool(ctx: HandlerContext, chatId: number, messageId: number,
   let permGate: Promise<void> = Promise.resolve();
 
   return async (toolName, input, { decisionReason, toolUseID }) => {
+    // Helper: reveal tool block and return allow
+    const allowWithReveal = async () => {
+      if (toolMsgRef) await toolMsgRef.revealBlock(toolUseID);
+      return { behavior: "allow" as const, updatedInput: input };
+    };
+
     // Guard: if session was suppressed (switched away), auto-allow without UI
-    if (suppressedSessions.has(sessionId)) {
+    if (isSessionSuppressed(sessionId)) {
       return { behavior: "allow" as const, updatedInput: input };
     }
 
@@ -355,17 +201,10 @@ function buildCanUseTool(ctx: HandlerContext, chatId: number, messageId: number,
     }
 
     // 2) Yolo mode or session yolo → auto-allow everything
-    if (ctx.yolo || sessionYolo.get(sessionId)) {
-      if (toolMsgRef) await toolMsgRef.revealBlock(toolUseID);
-      return { behavior: "allow" as const, updatedInput: input };
-    }
+    if (ctx.yolo || isSessionYolo(sessionId)) return allowWithReveal();
 
     // 3) Per-tool session allow
-    const allowedTools = sessionAutoAllowTools.get(sessionId);
-    if (allowedTools?.has(toolName)) {
-      if (toolMsgRef) await toolMsgRef.revealBlock(toolUseID);
-      return { behavior: "allow" as const, updatedInput: input };
-    }
+    if (isToolAllowed(sessionId, toolName)) return allowWithReveal();
 
     // 4) Non-yolo → serialize, then show Allow/Deny inline keyboard
     const prevGate = permGate;
@@ -381,15 +220,8 @@ function buildCanUseTool(ctx: HandlerContext, chatId: number, messageId: number,
       }
 
       // Re-check yolo/tool-allow in case it was set while queued (e.g. "Yolo for session" button)
-      if (ctx.yolo || sessionYolo.get(sessionId)) {
-        if (toolMsgRef) await toolMsgRef.revealBlock(toolUseID);
-        return { behavior: "allow" as const, updatedInput: input };
-      }
-      const allowedToolsRecheck = sessionAutoAllowTools.get(sessionId);
-      if (allowedToolsRecheck?.has(toolName)) {
-        if (toolMsgRef) await toolMsgRef.revealBlock(toolUseID);
-        return { behavior: "allow" as const, updatedInput: input };
-      }
+      if (ctx.yolo || isSessionYolo(sessionId)) return allowWithReveal();
+      if (isToolAllowed(sessionId, toolName)) return allowWithReveal();
 
       // Flush accumulated text so user sees tool context before the dialog
       if (flushRef) await flushRef.flush();
@@ -426,8 +258,11 @@ function buildCanUseTool(ctx: HandlerContext, chatId: number, messageId: number,
         });
         // Delete the permission dialog and append status to tool message
         deleteMessage(ctx.telegram, chatId, sentMsgId).catch(() => {});
-        if (result === "allow" || result === "allowall") {
-          if (toolMsgRef) await toolMsgRef.appendStatus(toolUseID, `✓ Allowed ${escapeHtml(toolName)}`);
+        if (result === "allow" || result === "tool" || result === "yolo") {
+          const label = result === "yolo" ? "✓ Yolo"
+            : result === "tool" ? `✓ Allowed ${escapeHtml(toolName)} (session)`
+            : `✓ Allowed ${escapeHtml(toolName)}`;
+          if (toolMsgRef) await toolMsgRef.appendStatus(toolUseID, label);
           return { behavior: "allow" as const, updatedInput: input };
         }
         if (toolMsgRef) await toolMsgRef.appendStatus(toolUseID, `✗ Denied ${escapeHtml(toolName)}`);
@@ -527,10 +362,10 @@ async function handleVoiceMessage(msg: Message, ctx: HandlerContext): Promise<vo
 
     if (!isSttReady()) {
       logger.warn("whisper", "Speech-to-text not set up");
-      const msg = isMacOS()
+      const notReadyText = isMacOS()
         ? "Speech-to-text is not set up.\nRun: remotecode setup-stt"
         : "Speech-to-text is currently not supported on Linux.";
-      await sendMessage(ctx.telegram, chatId, msg, { replyToMessageId: messageId });
+      await sendMessage(ctx.telegram, chatId, notReadyText, { replyToMessageId: messageId });
       return;
     }
 
@@ -547,9 +382,9 @@ async function handleVoiceMessage(msg: Message, ctx: HandlerContext): Promise<vo
       transcription = transcribeAudio(audioPath);
     } catch (sttErr) {
       silentTry("whisper", "cleanup audio", () => fs.unlinkSync(audioPath));
-      const msg = errorMessage(sttErr);
-      logger.warn("whisper", `Transcription failed chat_id=${chatId}: ${msg}`);
-      await sendMessage(ctx.telegram, chatId, `Speech-to-text error: ${escapeHtml(msg)}`, { replyToMessageId: messageId });
+      const errMsg = errorMessage(sttErr);
+      logger.warn("whisper", `Transcription failed chat_id=${chatId}: ${errMsg}`);
+      await sendMessage(ctx.telegram, chatId, `Speech-to-text error: ${escapeHtml(errMsg)}`, { replyToMessageId: messageId });
       return;
     }
     silentTry("whisper", "cleanup audio", () => fs.unlinkSync(audioPath));
@@ -646,7 +481,7 @@ export async function handlePrompt(
   const formattedPrompt = formatPrompt(prompt, imagePaths);
 
   // If this session is busy, queue the message
-  if (processingTurns.has(sessionId)) {
+  if (isSessionBusy(sessionId)) {
     // Pending AskUserQuestion → use text as the answer (don't queue as new prompt)
     if (hasPendingAsks()) {
       resolveAsksWithText(typeof formattedPrompt === "string" ? formattedPrompt : prompt);
@@ -703,7 +538,7 @@ async function streamResponse(
   // waiting for user interaction (AskUserQuestion, perm dialogs).
   const flushRef: FlushRef = {
     flush: async () => {
-      if (suppressedSessions.has(sessionId)) return;
+      if (isSessionSuppressed(sessionId)) return;
       if (textParts.length === 0) return;
       const text = stripThinking(textParts.join("\n"));
       if (!text) return;
@@ -769,7 +604,7 @@ async function streamResponse(
   };
 
   const quiet = options.quiet === true;
-  const isYolo = quiet || ctx.yolo || sessionYolo.get(sessionId) === true;
+  const isYolo = quiet || ctx.yolo || isSessionYolo(sessionId);
 
   for await (const msg of querySession(prompt, {
     sessionId,
@@ -779,7 +614,7 @@ async function streamResponse(
     canUseTool: buildCanUseTool(ctx, chatId, messageId, sessionId, flushRef, toolMsgRef),
   })) {
     // Skip sending messages if session was switched away or in quiet mode
-    const suppressed = suppressedSessions.has(sessionId) || quiet;
+    const suppressed = isSessionSuppressed(sessionId) || quiet;
 
     if (isSystemInit(msg)) {
       logger.debug("handler", `session init: ${msg.session_id?.slice(0, 8)}`);
@@ -905,14 +740,10 @@ async function executePrompt(
   const model = loadModel(ctx.sessionsFile);
 
   // Cancel any pending cleanup timeout — we're starting a new query for this session
-  const prevCleanup = queryCleanupTimeouts.get(sessionId);
-  if (prevCleanup) {
-    clearTimeout(prevCleanup);
-    queryCleanupTimeouts.delete(sessionId);
-  }
+  clearCleanupTimeout(sessionId);
 
   clearPermDenied(sessionId);
-  processingTurns.add(sessionId);
+  markProcessing(sessionId);
   activeQueries.add(sessionId);
   const typingHandle = startTyping(ctx.telegram, chatId);
 
@@ -924,53 +755,51 @@ async function executePrompt(
     if (!gotResult) return;
 
     // Don't send final response if session was switched away
-    if (!suppressedSessions.has(sessionId)) {
+    if (!isSessionSuppressed(sessionId)) {
       const promptText = typeof prompt === "string" ? prompt : prompt.filter(b => b.type === "text").map(b => (b as { text: string }).text).join("\n");
       await sendFinalResponse(textParts, promptText, chatId, messageId, ctx, voiceMode);
     }
   } finally {
     typingHandle.stop();
     skipToEnd();
-    suppressedSessions.delete(sessionId);
+    clearSuppression(sessionId);
 
     // Delay watcher guard removal to let SDK finish writing to JSONL.
-    // Cancel any previous timeout first to prevent stale removal during a new query.
     const sid = sessionId;
-    const prevTimer = queryCleanupTimeouts.get(sid);
-    if (prevTimer) clearTimeout(prevTimer);
+    clearCleanupTimeout(sid);
     const cleanupTimer = setTimeout(() => {
       skipToEnd();
       activeQueries.delete(sid);
-      queryCleanupTimeouts.delete(sid);
+      clearCleanupTimeout(sid);
     }, 2000);
-    queryCleanupTimeouts.set(sid, cleanupTimer);
+    setCleanupTimeout(sid, cleanupTimer);
 
     // Auto-close non-active session processes when their task finishes
     const currentActiveId = getOrCreateSessionId(ctx.sessionsFile);
-    const queue = messageQueue.get(sessionId);
-    const hasQueuedMessages = queue && queue.length > 0;
+    const queued = hasQueuedMessages(sessionId);
 
-    if (sessionId !== currentActiveId && !hasQueuedMessages) {
-      const closingTimer = queryCleanupTimeouts.get(sessionId);
-      if (closingTimer) clearTimeout(closingTimer);
-      queryCleanupTimeouts.delete(sessionId);
+    if (sessionId !== currentActiveId && !queued) {
+      clearCleanupTimeout(sessionId);
       activeQueries.delete(sessionId);
       closeSession(sessionId);
-      processingTurns.delete(sessionId);
+      clearProcessing(sessionId);
       return;
     }
 
     // Drain message queue
-    if (hasQueuedMessages) {
-      const next = queue!.shift()!;
-      if (queue!.length === 0) messageQueue.delete(sessionId);
-      // Keep processingTurns set — next executePrompt will manage it
-      executePrompt(sessionId, next.prompt, next.chatId, next.messageId, next.ctx, next.voiceMode, next.quiet).catch(err => {
-        logger.error("handler", `Queue drain error: ${errorMessage(err)}`);
-        processingTurns.delete(sessionId);
-      });
+    if (queued) {
+      const next = drainNext(sessionId);
+      if (next) {
+        // Keep processingTurns set — next executePrompt will manage it
+        executePrompt(sessionId, next.prompt, next.chatId, next.messageId, next.ctx, next.voiceMode, next.quiet).catch(err => {
+          logger.error("handler", `Queue drain error: ${errorMessage(err)}`);
+          clearProcessing(sessionId);
+        });
+      } else {
+        clearProcessing(sessionId);
+      }
     } else {
-      processingTurns.delete(sessionId);
+      clearProcessing(sessionId);
     }
   }
 }

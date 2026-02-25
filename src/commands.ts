@@ -24,7 +24,8 @@ import {
 import { HandlerContext } from "./context";
 import { buildProjectListDisplay, denyAllPending, allowAllPending, stopOldSession } from "./callbacks";
 import { interruptSession } from "./claude";
-import { clearQueue, isSessionBusy, suppressSessionMessages, setSessionAutoAllow, handlePrompt } from "./handler";
+import { clearQueue, isSessionBusy, suppressSessionMessages, setSessionAutoAllow } from "./session-state";
+import { handlePrompt } from "./handler";
 
 export async function handleCommand(
   text: string,

@@ -9,7 +9,7 @@ import {
 import { logger, errorMessage, silentCatch } from "./logger";
 import { escapeHtml } from "./format";
 import { HandlerContext, isUserAllowed } from "./context";
-import { setSessionAutoAllow, setSessionToolAllow, resetSessionAutoAllow, isSessionBusy, suppressSessionMessages, unsuppressSessionMessages } from "./handler";
+import { setSessionAutoAllow, setSessionToolAllow, resetSessionAutoAllow, isSessionBusy, suppressSessionMessages, unsuppressSessionMessages } from "./session-state";
 import {
   loadActiveSessionId,
   saveActiveSessionId,
@@ -81,7 +81,7 @@ export interface PermMsgInfo {
 }
 
 const pendingPerm = new Map<string, {
-  resolve: (decision: "allow" | "deny" | "allowall") => void;
+  resolve: (decision: "allow" | "deny" | "tool" | "yolo") => void;
   timer: ReturnType<typeof setTimeout>;
   meta: PermMeta;
   msgInfo?: PermMsgInfo;
@@ -99,7 +99,7 @@ export function registerPendingAsk(id: string, meta?: AskMeta, msgInfo?: PermMsg
   });
 }
 
-export function registerPendingPerm(id: string, meta: PermMeta, msgInfo?: PermMsgInfo): Promise<"allow" | "deny" | "allowall"> {
+export function registerPendingPerm(id: string, meta: PermMeta, msgInfo?: PermMsgInfo): Promise<"allow" | "deny" | "tool" | "yolo"> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       pendingPerm.delete(id);
@@ -325,10 +325,10 @@ async function handlePermCallback(
 
     if (decision === "tool") {
       setSessionToolAllow(sessionId, toolName);
-      pending.resolve("allow");
+      pending.resolve("tool");
     } else if (decision === "yolo") {
       setSessionAutoAllow(sessionId);
-      pending.resolve("allow");
+      pending.resolve("yolo");
     } else if (decision === "allow") {
       pending.resolve("allow");
     } else {

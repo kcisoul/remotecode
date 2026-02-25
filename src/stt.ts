@@ -1,10 +1,10 @@
 import * as fs from "fs";
-import { execSync } from "child_process";
+import { execSync, spawnSync } from "child_process";
 import { input } from "@inquirer/prompts";
 import axios from "axios";
 import { whisperModelDir, whisperModelPath } from "./config";
 import { printBanner, stopBannerResize } from "./banner";
-import { errorMessage } from "./logger";
+import { errorMessage, logger, silentTry } from "./logger";
 
 const MODEL_URL =
   "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin";
@@ -202,4 +202,43 @@ export async function cmdSetupStt(): Promise<void> {
   }
 
   console.log("\nSTT enabled. Send a voice message to your bot!");
+}
+
+// ---------- whisper transcription (runtime) ----------
+
+export function convertToWav(inputPath: string): string {
+  const wavPath = inputPath.replace(/\.[^.]+$/, "") + ".wav";
+  const result = spawnSync("ffmpeg", [
+    "-y", "-i", inputPath, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wavPath,
+  ], { timeout: 30000, stdio: ["pipe", "pipe", "pipe"] });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    throw new Error(`ffmpeg exited with code ${result.status}: ${result.stderr?.toString("utf-8").slice(0, 200)}`);
+  }
+  return wavPath;
+}
+
+export function transcribeAudio(audioPath: string): string {
+  let wavPath = audioPath;
+  if (!audioPath.toLowerCase().endsWith(".wav")) {
+    wavPath = convertToWav(audioPath);
+  }
+
+  try {
+    const modelPath = whisperModelPath();
+    const whisperBin = checkSttStatus().whisperCli || "whisper-cli";
+    logger.debug("whisper", `transcribing: ${wavPath} (bin: ${whisperBin})`);
+    const result = spawnSync(whisperBin, [
+      "-m", modelPath, "-l", "auto", "--no-timestamps", "--no-prints", "-f", wavPath,
+    ], { timeout: 60000, stdio: ["pipe", "pipe", "pipe"] });
+    if (result.error) throw result.error;
+    if (result.status !== 0) {
+      throw new Error(`whisper exited with code ${result.status}: ${result.stderr?.toString("utf-8").slice(0, 200)}`);
+    }
+    return result.stdout.toString("utf-8").trim();
+  } finally {
+    if (wavPath !== audioPath) {
+      silentTry("whisper", "cleanup wav", () => fs.unlinkSync(wavPath));
+    }
+  }
 }

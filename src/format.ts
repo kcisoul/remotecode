@@ -110,3 +110,68 @@ export function truncateMessage(text: string, limit: number = 3500): string {
   if (text.length <= limit) return text;
   return text.slice(0, limit) + "\n...[truncated]";
 }
+
+// ---------- tool description formatting ----------
+
+function formatToolDetail(toolName: string, input: Record<string, unknown>): string {
+  const e = escapeHtml;
+  switch (toolName) {
+    case "Bash":
+      return `${e(String(input.command || "").slice(0, 200))}`;
+    case "Edit":
+    case "Write":
+    case "Read":
+      return `${e(String(input.file_path || ""))}`;
+    case "Glob":
+    case "Grep":
+      return `${e(String(input.pattern || ""))}`;
+    case "Task":
+      return `${e(String(input.description || ""))}`;
+    case "WebSearch":
+      return `${e(String(input.query || "").slice(0, 200))}`;
+    case "WebFetch":
+      return `${e(String(input.url || "").slice(0, 200))}`;
+    case "NotebookEdit":
+      return `${e(String(input.notebook_path || ""))}`;
+    case "Skill":
+      return `${e(String(input.skill || ""))}`;
+    default:
+      return "";
+  }
+}
+
+export function detectBashLang(command: string): string {
+  const cmd = command.trimStart();
+  if (/^python[23]?\s/.test(cmd)) return "python";
+  if (/^node\s/.test(cmd)) return "javascript";
+  if (/^ruby\s/.test(cmd)) return "ruby";
+  if (/^go\s/.test(cmd)) return "go";
+  if (/^cargo\s|^rustc\s/.test(cmd)) return "rust";
+  if (/^swift\s|^swiftc\s/.test(cmd)) return "swift";
+  if (/^java\s|^javac\s|^gradle\s|^mvn\s/.test(cmd)) return "java";
+  return "bash";
+}
+
+function toolLanguage(toolName: string, input: Record<string, unknown>): string {
+  switch (toolName) {
+    case "Bash": return detectBashLang(String(input.command || ""));
+    case "Edit":
+    case "Write":
+    case "Read":
+    case "Glob":
+    case "Grep": return "bash";
+    case "WebSearch":
+    case "WebFetch": return "bash";
+    case "Task": return "bash";
+    default: return "bash";
+  }
+}
+
+export function formatToolDescription(toolName: string, input: Record<string, unknown>): string {
+  const lang = toolLanguage(toolName, input);
+  const detail = formatToolDetail(toolName, input);
+  if (detail) {
+    return `<pre><code class="language-${lang}">${escapeHtml(toolName)}: ${detail}</code></pre>`;
+  }
+  return `<pre><code class="language-${lang}">${escapeHtml(toolName)}</code></pre>`;
+}
