@@ -137,6 +137,25 @@ Send these as messages in your Telegram chat with the bot:
 | `/cancel` | Cancel the current task |
 | `/model` | Switch Claude model (Sonnet / Opus / Haiku) |
 | `/sync` | Toggle auto-sync notifications on/off |
+| `/<skill>` | Invoke any Claude Code skill (auto-discovered) |
+
+### Claude Code Skills
+
+Any `/command` not recognized as a built-in bot command is automatically forwarded to Claude Code as a skill invocation. RemoteCode discovers skills from:
+
+- **`~/.claude/skills/*/SKILL.md`** -- standalone skills installed in the skills directory
+- **Enabled plugins** -- skills bundled with plugins listed in `~/.claude/settings.json` under `enabledPlugins`
+
+Discovered skills are registered as Telegram bot commands on startup, so they appear in Telegram's `/` command menu alongside built-in commands.
+
+**Example:**
+
+```
+/last30days AI video tools      → Invokes the last30days skill with "AI video tools"
+/mem_search auth implementation → Searches claude-mem memory for "auth implementation"
+```
+
+When invoked, the skill's `SKILL.md` content is loaded and injected into the prompt as context, so Claude follows the skill's instructions. If no matching skill file is found, the command is forwarded as a generic skill invocation request.
 
 ### Inline Buttons
 

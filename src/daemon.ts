@@ -2,7 +2,7 @@ import * as fs from "fs";
 import { spawn, execSync } from "child_process";
 import {
   loadConfig, getConfig, ensureConfigDir, pidFilePath, logFilePath, sessionsFilePath,
-  readEnvLines, writeEnvLines, readKvFile,
+  readEnvLines, writeEnvLines, readKvFile, discoverSkills,
 } from "./config";
 import { logger, errorMessage } from "./logger";
 import {
@@ -123,7 +123,7 @@ function setupLogging(): void {
 
 // ---------- Bot commands ----------
 async function registerCommands(config: TelegramConfig): Promise<void> {
-  const commands = [
+  const builtIn = [
     { command: "start", description: "Welcome message and quick actions" },
     { command: "help", description: "Show help and commands" },
     { command: "sessions", description: "List local Claude Code sessions" },
@@ -134,6 +134,19 @@ async function registerCommands(config: TelegramConfig): Promise<void> {
     { command: "model", description: "Switch Claude model" },
     { command: "sync", description: "Toggle auto-sync notifications" },
   ];
+  const builtInNames = new Set(builtIn.map(c => c.command));
+
+  // Discover Claude Code skills and register as Telegram commands
+  const skills = discoverSkills();
+  const skillCommands = skills
+    .filter(s => !builtInNames.has(s.name))
+    .map(s => ({
+      command: s.name.replace(/[^a-z0-9_]/gi, "_").toLowerCase(),
+      description: (s.description || "Claude Code skill").slice(0, 256),
+    }));
+
+  const commands = [...builtIn, ...skillCommands];
+  logger.info("daemon", `Registering ${commands.length} commands (${skillCommands.length} skills)`);
   await setMyCommands(config, commands);
 }
 
