@@ -277,6 +277,22 @@ export function discoverProjects(): ProjectInfo[] {
   return results;
 }
 
+// ---------- find encoded dir from cwd ----------
+export function findEncodedDir(cwd: string): string | null {
+  if (!cwd) return null;
+  const pDir = projectsDir();
+  if (!fs.existsSync(pDir)) return null;
+  try {
+    for (const dir of fs.readdirSync(pDir)) {
+      const dirPath = path.join(pDir, dir);
+      if (!fs.statSync(dirPath).isDirectory()) continue;
+      if (dir === "memory") continue;
+      if (decodeProjectPath(dir) === cwd) return dir;
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
 // ---------- model preference ----------
 export function loadModel(sessionsFile: string): string | undefined {
   return readKvFile(sessionsFile).REMOTECODE_MODEL || undefined;

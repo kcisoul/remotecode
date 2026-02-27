@@ -4,12 +4,14 @@ import { MODEL_CHOICES } from "./config";
 import { isAutoSyncEnabled, setAutoSync } from "./watcher";
 import {
   loadActiveSessionId,
+  loadSessionCwd,
   saveActiveSessionId,
   saveSessionCwd,
   discoverSessions,
   discoverProjects,
   discoverProjectSessions,
   findSession,
+  findEncodedDir,
   createNewSession,
   saveModel,
   loadModel,
@@ -51,6 +53,7 @@ export async function handleCommand(
       "/new - Start a new session",
       "/history - Show conversation history",
       "/model - Switch Claude model",
+      "/resume - Resume a session in the current project",
       "/cancel - Cancel the current task",
       "/sync - Toggle auto-sync notifications",
     ].join("\n");
@@ -194,12 +197,47 @@ export async function handleCommand(
 
   if (command === "/new") {
     logger.debug("command", `chat_id=${chatId} command=/new`);
-    stopOldSession(ctx.sessionsFile);
-    createNewSession(ctx.sessionsFile);
-    await sendMessage(ctx.telegram, chatId, "New session started.", {
+    const cwd = loadSessionCwd(ctx.sessionsFile);
+    const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
+    if (cwd) {
+      const name = cwd.split("/").pop() || cwd;
+      buttons.push([{ text: `\ud83d\udcc1 ${name}`, callback_data: "newsess:current" }]);
+    }
+    buttons.push([{ text: "\ud83d\udcc1 Default workspace", callback_data: "newsess:default" }]);
+    buttons.push([{ text: "\ud83d\udcc2 Other project...", callback_data: "newsess:custom" }]);
+    buttons.push([{ text: "\u2716 Cancel", callback_data: "newsess:cancel" }]);
+    await sendMessage(ctx.telegram, chatId, "Create new session in:", {
       replyToMessageId: messageId,
-      replyMarkup: sessionsReplyKeyboard(ctx.sessionsFile),
+      replyMarkup: { inline_keyboard: buttons },
     });
+    return true;
+  }
+
+  if (command === "/resume") {
+    logger.debug("command", `chat_id=${chatId} command=/resume`);
+    const cwd = loadSessionCwd(ctx.sessionsFile);
+    const encodedDir = cwd ? findEncodedDir(cwd) : null;
+    if (encodedDir) {
+      const activeId = loadActiveSessionId(ctx.sessionsFile);
+      const sessions = discoverProjectSessions(encodedDir, 5);
+      const projName = sessions.length > 0 ? sessions[0].projectName : cwd!.split("/").pop() || cwd!;
+      const display = buildProjectSessionDisplay(sessions, activeId, projName, encodedDir);
+      await sendMessage(ctx.telegram, chatId, display.text, {
+        replyToMessageId: messageId,
+        parseMode: "HTML",
+        replyMarkup: { inline_keyboard: display.buttons },
+      });
+    } else {
+      // No project selected — fallback to global sessions
+      const sessions = discoverSessions(5);
+      const activeId = loadActiveSessionId(ctx.sessionsFile);
+      const display = buildSessionDisplay(sessions, activeId);
+      await sendMessage(ctx.telegram, chatId, display.text, {
+        replyToMessageId: messageId,
+        parseMode: "HTML",
+        replyMarkup: { inline_keyboard: display.buttons },
+      });
+    }
     return true;
   }
 

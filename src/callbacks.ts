@@ -8,10 +8,12 @@ import {
 } from "./telegram";
 import { logger, errorMessage, silentCatch } from "./logger";
 import { escapeHtml } from "./format";
+import { defaultCwd } from "./config";
 import { HandlerContext, isUserAllowed } from "./context";
 import { setSessionAutoAllow, setSessionToolAllow, resetSessionAutoAllow, isSessionBusy, suppressSessionMessages, unsuppressSessionMessages } from "./session-state";
 import {
   loadActiveSessionId,
+  loadSessionCwd,
   saveActiveSessionId,
   saveSessionCwd,
   saveModel,
@@ -33,15 +35,17 @@ import {
 } from "./session-ui";
 
 // ---------- pending text input system ----------
+type PendingInputType = "new_project" | "new_session_dir";
+
 interface PendingInput {
-  type: "new_project";
+  type: PendingInputType;
   timer: ReturnType<typeof setTimeout>;
 }
 
 const pendingInputs = new Map<number, PendingInput>();
 const PENDING_INPUT_TIMEOUT_MS = 120_000; // 2 minutes
 
-export function registerPendingInput(chatId: number, type: "new_project"): void {
+export function registerPendingInput(chatId: number, type: PendingInputType): void {
   const prev = pendingInputs.get(chatId);
   if (prev) clearTimeout(prev.timer);
   const timer = setTimeout(() => { pendingInputs.delete(chatId); }, PENDING_INPUT_TIMEOUT_MS);
@@ -90,20 +94,28 @@ const pendingPerm = new Map<string, {
 const PENDING_TIMEOUT_MS = 300_000; // 5 minutes
 
 export function registerPendingAsk(id: string, meta?: AskMeta, msgInfo?: PermMsgInfo): Promise<Record<string, string>> {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     const timer = setTimeout(() => {
       pendingAsk.delete(id);
-      reject(new Error("Timeout waiting for user response"));
+      if (msgInfo) {
+        silentCatch("callback", "editAskTimeout",
+          editMessageText(msgInfo.telegram, msgInfo.chatId, msgInfo.sentMessageId, "Timed out"));
+      }
+      resolve({ answer: "" });
     }, PENDING_TIMEOUT_MS);
     pendingAsk.set(id, { resolve, timer, meta, msgInfo });
   });
 }
 
 export function registerPendingPerm(id: string, meta: PermMeta, msgInfo?: PermMsgInfo): Promise<"allow" | "deny" | "tool" | "yolo"> {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     const timer = setTimeout(() => {
       pendingPerm.delete(id);
-      reject(new Error("Timeout waiting for permission response"));
+      if (msgInfo) {
+        silentCatch("callback", "editPermTimeout",
+          editMessageText(msgInfo.telegram, msgInfo.chatId, msgInfo.sentMessageId, "Timed out"));
+      }
+      resolve("deny");
     }, PENDING_TIMEOUT_MS);
     pendingPerm.set(id, { resolve, timer, meta, msgInfo });
   });
@@ -176,6 +188,21 @@ export function resolveAsksWithText(text: string): boolean {
   return true;
 }
 
+// ---------- takeover handler registration (breaks circular dep with handler.ts) ----------
+type TakeoverHandler = (sessionId: string, chatId: number, messageId: number, ctx: HandlerContext) => Promise<void>;
+let takeoverHandler: TakeoverHandler | null = null;
+
+export function registerTakeoverHandler(handler: TakeoverHandler): void {
+  takeoverHandler = handler;
+}
+
+type WatcherCleanupFn = () => void;
+let clearWatcherPermStateRef: WatcherCleanupFn | null = null;
+
+export function registerWatcherCleanup(fn: WatcherCleanupFn): void {
+  clearWatcherPermStateRef = fn;
+}
+
 // ---------- per-session perm-denied flag (prevents queued canUseTool from showing dialogs after deny) ----------
 const permDenied = new Set<string>();
 
@@ -236,6 +263,20 @@ export function buildProjectListDisplay(): { text: string; buttons: Array<Array<
   return { text: blocks.join("\n\n"), buttons };
 }
 
+// ---------- callback dispatch table ----------
+type CallbackHandler = (data: string, chatId: number, messageId: number, ctx: HandlerContext) => Promise<void>;
+
+const callbackRoutes: Array<[string, CallbackHandler]> = [
+  ["proj:", handleProjectCallback],
+  ["newsess:", handleNewSessionCallback],
+  ["sessdel:", handleSessionDeleteCallback],
+  ["sess:", handleSessionCallback],
+  ["ask:", handleAskCallback],
+  ["perm:", handlePermCallback],
+  ["model:", handleModelCallback],
+  ["takeover:", handleTakeoverCallback],
+];
+
 // ---------- main callback handler ----------
 export async function handleCallbackQuery(callback: CallbackQuery, ctx: HandlerContext): Promise<void> {
   const user = callback.from;
@@ -258,12 +299,8 @@ export async function handleCallbackQuery(callback: CallbackQuery, ctx: HandlerC
   try {
     logger.debug("callback", `chat_id=${chatId} message_id=${messageId} data=${data}`);
 
-    if (data.startsWith("proj:")) return handleProjectCallback(data, chatId, messageId, ctx);
-    if (data.startsWith("sessdel:")) return handleSessionDeleteCallback(data, chatId, messageId, ctx);
-    if (data.startsWith("sess:")) return handleSessionCallback(data, chatId, messageId, ctx);
-    if (data.startsWith("ask:")) return handleAskCallback(data, chatId, messageId, ctx);
-    if (data.startsWith("perm:")) return handlePermCallback(data, chatId, messageId, ctx);
-    if (data.startsWith("model:")) return handleModelCallback(data, chatId, messageId, ctx);
+    const route = callbackRoutes.find(([prefix]) => data.startsWith(prefix));
+    if (route) return route[1](data, chatId, messageId, ctx);
   } catch (err) {
     logger.error("callback", `Error in handleCallbackQuery: ${errorMessage(err)}`, err);
     await sendMessage(ctx.telegram, chatId, `Error: ${escapeHtml(errorMessage(err))}`, { replyToMessageId: messageId });
@@ -352,6 +389,44 @@ async function handleModelCallback(
   const model = data.slice("model:".length);
   saveModel(ctx.sessionsFile, model);
   silentCatch("callback", "editModelResponse", editMessageText(ctx.telegram, chatId, messageId, `Model: ${model}`));
+}
+
+// ---------- takeover callback ----------
+async function handleTakeoverCallback(
+  data: string,
+  chatId: number,
+  messageId: number,
+  ctx: HandlerContext,
+): Promise<void> {
+  const action = data.slice("takeover:".length);
+
+  if (action === "dismiss") {
+    silentCatch("callback", "deleteMessage takeover:dismiss", deleteMessage(ctx.telegram, chatId, messageId));
+    clearWatcherPermStateRef?.();
+    return;
+  }
+
+  // action is sessionId
+  const sessionId = action;
+
+  // Edit the notification to show takeover in progress
+  silentCatch("callback", "editTakeover",
+    editMessageText(ctx.telegram, chatId, messageId, "📱 Taking over session..."));
+
+  if (!takeoverHandler) {
+    logger.error("callback", "takeover handler not registered");
+    silentCatch("callback", "editTakeoverFailed",
+      editMessageText(ctx.telegram, chatId, messageId, "Takeover failed: handler not registered"));
+    return;
+  }
+
+  try {
+    await takeoverHandler(sessionId, chatId, messageId, ctx);
+  } catch (err) {
+    logger.error("callback", `takeover error: ${errorMessage(err)}`);
+    silentCatch("callback", "editTakeoverError",
+      editMessageText(ctx.telegram, chatId, messageId, `Takeover failed: ${escapeHtml(errorMessage(err))}`));
+  }
 }
 
 // ---------- project callback ----------
@@ -444,10 +519,21 @@ async function handleSessionCallback(
   }
 
   if (action === "new") {
-    stopOldSession(ctx.sessionsFile);
-    createNewSession(ctx.sessionsFile);
-    silentCatch("callback", "deleteMessage sess:new", deleteMessage(ctx.telegram, chatId, messageId));
-    await sendMessage(ctx.telegram, chatId, "New session started.", { replyMarkup: sessionsReplyKeyboard(ctx.sessionsFile) });
+    // Show interactive menu for new session creation
+    const cwd = loadSessionCwd(ctx.sessionsFile);
+    const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
+    if (cwd) {
+      const name = cwd.split("/").pop() || cwd;
+      buttons.push([{ text: `\ud83d\udcc1 ${name}`, callback_data: "newsess:current" }]);
+    }
+    buttons.push([{ text: "\ud83d\udcc1 Default workspace", callback_data: "newsess:default" }]);
+    buttons.push([{ text: "\ud83d\udcc2 Other project...", callback_data: "newsess:custom" }]);
+    buttons.push([{ text: "\u2716 Cancel", callback_data: "newsess:cancel" }]);
+    try {
+      await editMessageText(ctx.telegram, chatId, messageId, "Create new session in:", {
+        replyMarkup: { inline_keyboard: buttons },
+      });
+    } catch (err) { logger.debug("callback", `editMessageText sess:new menu: ${errorMessage(err)}`); }
     return;
   }
 
@@ -471,6 +557,55 @@ async function handleSessionCallback(
     replyMarkup: sessionsReplyKeyboard(ctx.sessionsFile),
     parseMode: pages.length > 0 ? "HTML" : undefined,
   });
+}
+
+// ---------- new session menu callback ----------
+async function handleNewSessionCallback(
+  data: string,
+  chatId: number,
+  messageId: number,
+  ctx: HandlerContext
+): Promise<void> {
+  const action = data.slice("newsess:".length);
+
+  if (action === "current") {
+    const cwd = loadSessionCwd(ctx.sessionsFile);
+    if (!cwd) {
+      silentCatch("callback", "editNewSessNoCwd", editMessageText(ctx.telegram, chatId, messageId, "No project selected."));
+      return;
+    }
+    stopOldSession(ctx.sessionsFile);
+    createNewSession(ctx.sessionsFile, cwd);
+    const name = cwd.split("/").pop() || cwd;
+    silentCatch("callback", "deleteMessage newsess:current", deleteMessage(ctx.telegram, chatId, messageId));
+    await sendMessage(ctx.telegram, chatId, `New session in ${name}`, { replyMarkup: sessionsReplyKeyboard(ctx.sessionsFile) });
+    return;
+  }
+
+  if (action === "default") {
+    const cwd = defaultCwd();
+    stopOldSession(ctx.sessionsFile);
+    createNewSession(ctx.sessionsFile, cwd);
+    silentCatch("callback", "deleteMessage newsess:default", deleteMessage(ctx.telegram, chatId, messageId));
+    await sendMessage(ctx.telegram, chatId, "New session in RemoteCodeSessions", { replyMarkup: sessionsReplyKeyboard(ctx.sessionsFile) });
+    return;
+  }
+
+  if (action === "cancel") {
+    consumePendingInput(chatId);
+    silentCatch("callback", "deleteMessage newsess:cancel", deleteMessage(ctx.telegram, chatId, messageId));
+    return;
+  }
+
+  if (action === "custom") {
+    registerPendingInput(chatId, "new_session_dir");
+    silentCatch("callback", "deleteMessage newsess:custom", deleteMessage(ctx.telegram, chatId, messageId));
+    await sendMessage(ctx.telegram, chatId, "Enter directory path under <code>~/</code>\n(e.g. <code>myapp</code> or <code>work/myapp</code>)", {
+      parseMode: "HTML",
+      replyMarkup: { inline_keyboard: [[{ text: "\u2716 Cancel", callback_data: "newsess:cancel" }]] },
+    });
+    return;
+  }
 }
 
 // ---------- session delete callback ----------
