@@ -1,3 +1,4 @@
+import * as fs from "fs";
 import * as path from "path";
 import { query, type SDKMessage, type SDKUserMessage, type PermissionResult, type Query } from "@anthropic-ai/claude-agent-sdk";
 import { findSessionFilePath } from "./sessions";
@@ -106,6 +107,7 @@ interface SessionState {
   releaseTurn: (() => void) | null;
   interrupted: boolean;
   stale: boolean;
+  lastFileSize: number;
 }
 
 const sessions = new Map<string, SessionState>();
@@ -149,6 +151,14 @@ export function markSessionStale(sessionId: string): void {
     logger.debug("claude", `marking session ${sessionId.slice(0, 8)} as stale (external changes detected)`);
     s.stale = true;
   }
+}
+
+// ---------- JSONL file size snapshot ----------
+
+function getJsonlFileSize(sessionId: string): number {
+  const filePath = findSessionFilePath(sessionId);
+  if (!filePath) return 0;
+  try { return fs.statSync(filePath).size; } catch { return 0; }
 }
 
 // ---------- session creation helper ----------
@@ -201,6 +211,7 @@ function initNewSession(
     releaseTurn: null,
     interrupted: false,
     stale: false,
+    lastFileSize: 0,
   };
 
   sessions.set(sessionId, newSession);
@@ -218,6 +229,14 @@ export async function* querySession(
   let session = sessions.get(sessionId);
 
   // Stale session: external changes detected, recreate to pick up new JSONL context
+  if (session && !session.stale) {
+    // Check if JSONL file grew since last turn (host CLI wrote new messages)
+    const currentSize = getJsonlFileSize(sessionId);
+    if (currentSize > 0 && session.lastFileSize > 0 && currentSize !== session.lastFileSize) {
+      logger.debug("claude", `JSONL size changed for ${sessionId.slice(0, 8)} (${session.lastFileSize} → ${currentSize}), marking stale`);
+      session.stale = true;
+    }
+  }
   if (session?.stale) {
     logger.debug("claude", `recreating stale session ${sessionId.slice(0, 8)}`);
     session.channel.close();
@@ -247,6 +266,7 @@ export async function* querySession(
     try {
       yield* readUntilResult(sessionId);
     } finally {
+      session.lastFileSize = getJsonlFileSize(sessionId);
       if (session.releaseTurn) {
         session.releaseTurn();
         session.releaseTurn = null;
@@ -265,6 +285,7 @@ export async function* querySession(
       newSession = initNewSession(prompt, sessionId, options, false);
       yield* readUntilResult(sessionId);
     } finally {
+      newSession.lastFileSize = getJsonlFileSize(sessionId);
       if (newSession.releaseTurn) {
         newSession.releaseTurn();
         newSession.releaseTurn = null;
