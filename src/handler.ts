@@ -13,7 +13,7 @@ import {
   sendChatAction,
   downloadFile,
 } from "./telegram";
-import { querySession, closeSession, wasSessionInterrupted, type CanUseToolFn, type MessageContent } from "./claude";
+import { querySession, closeSession, wasSessionInterrupted, markSessionStale, type CanUseToolFn, type MessageContent } from "./claude";
 import { mdToTelegramHtml, escapeHtml, tryMdToHtml, truncateMessage, stripThinking, formatToolDescription } from "./format";
 import { logger, errorMessage, silentCatch, silentTry } from "./logger";
 import { defaultCwd, whisperModelPath, SILENT_TOOLS } from "./config";
@@ -22,14 +22,19 @@ import {
   loadSessionCwd,
   loadModel,
   createNewSession,
+  findSession,
+  findSessionFilePath,
+  saveActiveSessionId,
+  saveSessionCwd,
 } from "./sessions";
 import { sessionsReplyKeyboard } from "./session-ui";
 import { handleCommand } from "./commands";
 import { HandlerContext, isUserAllowed, activeQueries } from "./context";
-import { registerPendingAsk, registerPendingPerm, denyAllPending, hasPendingPerms, hasPendingAsks, resolveAsksWithText, consumePendingInput, isPermDenied, clearPermDenied, stopOldSession } from "./callbacks";
+import { registerPendingAsk, registerPendingPerm, denyAllPending, hasPendingPerms, hasPendingAsks, resolveAsksWithText, consumePendingInput, isPermDenied, clearPermDenied, stopOldSession, registerTakeoverHandler, registerWatcherCleanup } from "./callbacks";
 import { isSttReady, isMacOS, transcribeAudio } from "./stt";
-import { skipToEnd } from "./watcher";
+import { skipToEnd, clearWatcherPermState, getPendingToolUses } from "./watcher";
 import { isAssistantMessage, isSystemInit, isTaskStarted, isTaskNotification, isResult, isResultError } from "./sdk-types";
+import { matchCliPermissions } from "./permissions";
 import {
   isSessionYolo, isToolAllowed, isSessionSuppressed, clearSuppression,
   setCleanupTimeout, clearCleanupTimeout,
@@ -44,6 +49,94 @@ import {
 function rewriteSdkError(text: string): string {
   return text.replace(/Please run \/login/g, "For security, login is not supported via Telegram. Please run `claude login` in Claude Code CLI");
 }
+
+// ---------- read last user prompt from JSONL ----------
+import { extractMessageContent } from "./jsonl";
+
+function readLastUserPrompt(sessionId: string): string | null {
+  const filePath = findSessionFilePath(sessionId);
+  if (!filePath) return null;
+
+  let content: string;
+  try {
+    content = fs.readFileSync(filePath, "utf-8");
+  } catch {
+    return null;
+  }
+
+  // Parse lines in reverse to find last real user message (not tool_result, not meta)
+  const lines = content.split("\n").filter(l => l.trim());
+  for (let i = lines.length - 1; i >= 0; i--) {
+    let entry: Record<string, unknown>;
+    try {
+      entry = JSON.parse(lines[i]);
+    } catch {
+      continue;
+    }
+
+    if (entry.type !== "user") continue;
+    if (entry.isMeta) continue;
+
+    const msgObj = entry.message as Record<string, unknown> | undefined;
+    const msgContent = msgObj?.content;
+
+    // Skip tool_result messages
+    if (Array.isArray(msgContent) && msgContent.length > 0 &&
+        (msgContent[0] as Record<string, unknown>)?.type === "tool_result") continue;
+    if (entry.toolUseResult) continue;
+
+    const text = extractMessageContent(msgContent);
+    if (text) return text;
+  }
+
+  return null;
+}
+
+// ---------- takeover handler (registered with callbacks.ts to break circular dep) ----------
+async function handleTakeover(
+  sessionId: string,
+  chatId: number,
+  messageId: number,
+  ctx: HandlerContext,
+): Promise<void> {
+  // Mark SDK session as stale so it recreates with resume: sessionId
+  markSessionStale(sessionId);
+
+  // Resolve session CWD from the JSONL file metadata
+  const session = findSession(sessionId);
+  if (session) {
+    stopOldSession(ctx.sessionsFile, sessionId);
+    saveActiveSessionId(ctx.sessionsFile, sessionId);
+    saveSessionCwd(ctx.sessionsFile, session.project);
+  }
+
+  // Show pending tool uses and get a valid replyToMessageId
+  // (the notification message will be deleted, so we need a new anchor)
+  const pendingTools = getPendingToolUses();
+  let replyId = messageId;
+  if (pendingTools.length > 0) {
+    const toolLines = pendingTools.map(t => formatToolDescription(t.toolName, t.input));
+    const text = `<b>Pending from host:</b>\n${toolLines.join("\n")}`;
+    try {
+      replyId = await sendMessage(ctx.telegram, chatId, text, { parseMode: "HTML" });
+    } catch {
+      replyId = await sendMessage(ctx.telegram, chatId, `Pending from host: ${pendingTools.map(t => t.toolName).join(", ")}`);
+    }
+  }
+
+  // Clear watcher permission notification (deletes the old notification message)
+  clearWatcherPermState();
+
+  // Read the last user prompt from JSONL so the session continues naturally
+  const lastPrompt = readLastUserPrompt(sessionId) || "continue";
+  logger.debug("takeover", `resuming with prompt: ${lastPrompt.slice(0, 80)}`);
+
+  // Resume via SDK — canUseTool is now active for permission dialogs
+  await handlePrompt(lastPrompt, chatId, replyId, ctx);
+}
+
+registerTakeoverHandler(handleTakeover);
+registerWatcherCleanup(clearWatcherPermState);
 
 // ---------- unauthorized tracking ----------
 const warnedUsers = new Set<string>();
@@ -153,8 +246,112 @@ interface ToolBlock {
   visible: boolean;
 }
 
+// ---------- tool message controller ----------
+/** Manages tool description messages in Telegram: batching, deduplication, edit serialization. */
+class ToolMessageController {
+  private msgId: number | null = null;
+  private blocks: ToolBlock[] = [];
+  private editLock: Promise<void> = Promise.resolve();
+
+  constructor(
+    private telegram: TelegramConfig,
+    private chatId: number,
+    private replyToId: number,
+  ) {}
+
+  reset(): void {
+    this.msgId = null;
+    this.blocks = [];
+  }
+
+  private render(): string {
+    return this.blocks
+      .filter(b => b.visible)
+      .map(b => b.status ? `${b.desc}\n${b.status}` : b.desc)
+      .join("\n");
+  }
+
+  /** Add new tool blocks, deduplicating by toolUseId. */
+  addBlocks(newBlocks: ToolBlock[]): void {
+    for (const nb of newBlocks) {
+      if (!this.blocks.some(b => b.toolUseId === nb.toolUseId)) {
+        this.blocks.push(nb);
+      }
+    }
+  }
+
+  /** Send or edit the tool message (for yolo mode streaming). */
+  async sendOrUpdate(): Promise<void> {
+    const rendered = this.render();
+    if (!rendered) return;
+    if (this.msgId) {
+      await editMessageText(this.telegram, this.chatId, this.msgId, rendered, { parseMode: "HTML" }).catch(() => {
+        this.msgId = null;
+      });
+    }
+    if (!this.msgId) {
+      this.msgId = await sendMessage(this.telegram, this.chatId, rendered, {
+        replyToMessageId: this.replyToId,
+        parseMode: "HTML",
+      });
+    }
+  }
+
+  /** Append a status line to a tool block and update the message. */
+  async appendStatus(toolUseId: string, status: string): Promise<void> {
+    const prev = this.editLock;
+    let release!: () => void;
+    this.editLock = new Promise(r => { release = r; });
+    try {
+      await prev;
+      if (!this.msgId) return;
+      const block = this.blocks.find(b => b.toolUseId === toolUseId);
+      if (block) block.status = status;
+      const rendered = this.render();
+      if (rendered) {
+        await editMessageText(this.telegram, this.chatId, this.msgId, rendered, { parseMode: "HTML" }).catch(() => {});
+      }
+    } finally {
+      release();
+    }
+  }
+
+  /** Make a hidden tool block visible and update/send the message. */
+  async revealBlock(toolUseId: string): Promise<void> {
+    const prev = this.editLock;
+    let release!: () => void;
+    this.editLock = new Promise(r => { release = r; });
+    try {
+      await prev;
+      const block = this.blocks.find(b => b.toolUseId === toolUseId);
+      if (!block || block.visible) return;
+      block.visible = true;
+      const rendered = this.render();
+      if (!rendered) return;
+      if (this.msgId) {
+        await editMessageText(this.telegram, this.chatId, this.msgId, rendered, { parseMode: "HTML" }).catch(() => {});
+      } else {
+        this.msgId = await sendMessage(this.telegram, this.chatId, rendered, {
+          replyToMessageId: this.replyToId,
+          parseMode: "HTML",
+        });
+      }
+    } finally {
+      release();
+    }
+  }
+
+  /** Create a ToolMsgRef for use by canUseTool callbacks. */
+  toRef(): ToolMsgRef {
+    return {
+      appendStatus: (id, status) => this.appendStatus(id, status),
+      revealBlock: (id) => this.revealBlock(id),
+    };
+  }
+}
+
 // ---------- canUseTool callback builder ----------
-function buildCanUseTool(ctx: HandlerContext, chatId: number, messageId: number, sessionId: string, flushRef?: FlushRef, toolMsgRef?: ToolMsgRef): CanUseToolFn {
+function buildCanUseTool(ctx: HandlerContext, chatId: number, messageId: number, sessionId: string, cwd: string, flushRef?: FlushRef, toolMsgRef?: ToolMsgRef): CanUseToolFn {
   // Serialize permission dialogs so only one is shown at a time
   let permGate: Promise<void> = Promise.resolve();
 
@@ -213,7 +410,12 @@ function buildCanUseTool(ctx: HandlerContext, chatId: number, messageId: number,
     // 3) Per-tool session allow
     if (isToolAllowed(sessionId, toolName)) return allowWithReveal();
 
-    // 4) Non-yolo → serialize, then show Allow/Deny inline keyboard
+    // 4) CLI settings.json permissions (global + project)
+    const cliPerm = matchCliPermissions(toolName, input, cwd);
+    if (cliPerm === "allow") return allowWithReveal();
+    if (cliPerm === "deny") return { behavior: "deny" as const, message: "Denied by CLI settings" };
+
+    // 5) Non-yolo → serialize, then show Allow/Deny inline keyboard
     const prevGate = permGate;
     let releaseGate!: () => void;
     permGate = new Promise<void>(r => { releaseGate = r; });
@@ -313,11 +515,15 @@ async function handleTextMessage(msg: Message, ctx: HandlerContext): Promise<voi
   try {
     logger.debug("text", `chat_id=${chatId} message_id=${messageId} text=${text}`);
 
-    // Check pending input (e.g. new project name)
+    // Check pending input (e.g. new project name, new session directory)
     const pendingType = consumePendingInput(chatId);
     if (pendingType && !text.startsWith("/")) {
       if (pendingType === "new_project") {
         await handleNewProject(text, chatId, messageId, ctx);
+        return;
+      }
+      if (pendingType === "new_session_dir") {
+        await handleNewSessionDir(text, chatId, messageId, ctx);
         return;
       }
     }
@@ -411,6 +617,14 @@ async function handleVoiceMessage(msg: Message, ctx: HandlerContext): Promise<vo
   }
 }
 
+// ---------- path validation ----------
+/** Validate and sanitize a relative path input (no ".." or absolute paths). Returns null if invalid. */
+function sanitizeRelativePath(input: string): string | null {
+  if (!input || input.includes("..") || path.isAbsolute(input)) return null;
+  const sanitized = input.replace(/\\/g, "/").replace(/\/+/g, "/").replace(/^\/|\/$/g, "");
+  return sanitized || null;
+}
+
 // ---------- new project creation ----------
 async function handleNewProject(
   input: string,
@@ -418,13 +632,7 @@ async function handleNewProject(
   messageId: number,
   ctx: HandlerContext,
 ): Promise<void> {
-  // Validate input
-  if (!input || input.includes("..") || path.isAbsolute(input)) {
-    await sendMessage(ctx.telegram, chatId, "Invalid path.", { replyToMessageId: messageId });
-    return;
-  }
-
-  const sanitized = input.replace(/\\/g, "/").replace(/\/+/g, "/").replace(/^\/|\/$/g, "");
+  const sanitized = sanitizeRelativePath(input);
   if (!sanitized) {
     await sendMessage(ctx.telegram, chatId, "Invalid path.", { replyToMessageId: messageId });
     return;
@@ -464,6 +672,44 @@ async function handleNewProject(
 
   // Send "new project" prompt to Claude to initialize the session
   await handlePrompt("new project", chatId, messageId, ctx);
+}
+
+// ---------- new session in directory ----------
+async function handleNewSessionDir(
+  input: string,
+  chatId: number,
+  messageId: number,
+  ctx: HandlerContext,
+): Promise<void> {
+  const sanitized = sanitizeRelativePath(input);
+  if (!sanitized) {
+    await sendMessage(ctx.telegram, chatId, "Invalid path.", { replyToMessageId: messageId });
+    return;
+  }
+
+  const fullPath = path.join(os.homedir(), sanitized);
+
+  // Create directory if it doesn't exist
+  if (!fs.existsSync(fullPath)) {
+    try {
+      fs.mkdirSync(fullPath, { recursive: true });
+    } catch (err) {
+      await sendMessage(ctx.telegram, chatId, `Failed to create directory: ${escapeHtml(errorMessage(err))}`, {
+        replyToMessageId: messageId,
+      });
+      return;
+    }
+  }
+
+  // Stop old session and create new one
+  stopOldSession(ctx.sessionsFile);
+  createNewSession(ctx.sessionsFile, fullPath);
+  const name = fullPath.split("/").pop() || sanitized;
+  await sendMessage(ctx.telegram, chatId, `New session in <code>~/${escapeHtml(sanitized)}</code>`, {
+    replyToMessageId: messageId,
+    parseMode: "HTML",
+    replyMarkup: sessionsReplyKeyboard(ctx.sessionsFile),
+  });
 }
 
 // ---------- prompt handling ----------
@@ -522,30 +768,10 @@ async function streamResponse(
 ): Promise<StreamResult> {
   const textParts: string[] = [];
   let gotResult = false;
-  // Mutable reply target: updated when user answers AskUserQuestion via text
   const getReplyId = () => getReplyTarget(sessionId) ?? messageId;
 
-  // Track the last tool description message so sequential tool_use
-  // blocks are edited into the same Telegram message instead of spamming.
-  let toolMsgId: number | null = null;
-  let toolBlocks: ToolBlock[] = [];
+  const toolCtrl = new ToolMessageController(ctx.telegram, chatId, messageId);
 
-  function resetToolMsg(): void {
-    toolMsgId = null;
-    toolBlocks = [];
-  }
-
-  function renderToolBlocks(): string {
-    return toolBlocks
-      .filter(b => b.visible)
-      .map(b => b.status ? `${b.desc}\n${b.status}` : b.desc)
-      .join("\n");
-  }
-
-  // Mutable flush ref: canUseTool calls this to send accumulated text
-  // before showing interactive UI (e.g. AskUserQuestion keyboard).
-  // Also exposes typing pause/resume so we stop "typing..." while
-  // waiting for user interaction (AskUserQuestion, perm dialogs).
   const flushRef: FlushRef = {
     flush: async () => {
       if (isSessionSuppressed(sessionId)) return;
@@ -563,56 +789,6 @@ async function streamResponse(
     resumeTyping: () => options.typingHandle?.resume(),
   };
 
-  // Mutable ref so canUseTool can append permission status to the tool description message.
-  // editLock serializes Telegram message edits to prevent race conditions when multiple
-  // auto-allowed tools reveal concurrently.
-  let editLock: Promise<void> = Promise.resolve();
-
-  const toolMsgRef: ToolMsgRef = {
-    appendStatus: async (toolUseId: string, status: string) => {
-      const prev = editLock;
-      let release!: () => void;
-      editLock = new Promise(r => { release = r; });
-      try {
-        await prev;
-        if (!toolMsgId) return;
-        const block = toolBlocks.find(b => b.toolUseId === toolUseId);
-        if (block) {
-          block.status = status;
-        }
-        const rendered = renderToolBlocks();
-        if (rendered) {
-          await editMessageText(ctx.telegram, chatId, toolMsgId, rendered, { parseMode: "HTML" }).catch(() => {});
-        }
-      } finally {
-        release();
-      }
-    },
-    revealBlock: async (toolUseId: string) => {
-      const prev = editLock;
-      let release!: () => void;
-      editLock = new Promise(r => { release = r; });
-      try {
-        await prev;
-        const block = toolBlocks.find(b => b.toolUseId === toolUseId);
-        if (!block || block.visible) return;
-        block.visible = true;
-        const rendered = renderToolBlocks();
-        if (!rendered) return;
-        if (toolMsgId) {
-          await editMessageText(ctx.telegram, chatId, toolMsgId, rendered, { parseMode: "HTML" }).catch(() => {});
-        } else {
-          toolMsgId = await sendMessage(ctx.telegram, chatId, rendered, {
-            replyToMessageId: messageId,
-            parseMode: "HTML",
-          });
-        }
-      } finally {
-        release();
-      }
-    },
-  };
-
   const quiet = options.quiet === true;
   const isYolo = quiet || ctx.yolo || isSessionYolo(sessionId);
 
@@ -621,9 +797,8 @@ async function streamResponse(
     cwd: options.cwd,
     yolo: isYolo,
     model: options.model,
-    canUseTool: buildCanUseTool(ctx, chatId, messageId, sessionId, flushRef, toolMsgRef),
+    canUseTool: buildCanUseTool(ctx, chatId, messageId, sessionId, options.cwd, flushRef, toolCtrl.toRef()),
   })) {
-    // Skip sending messages if session was switched away or in quiet mode
     const suppressed = isSessionSuppressed(sessionId) || quiet;
 
     if (isSystemInit(msg)) {
@@ -646,35 +821,10 @@ async function streamResponse(
           });
         }
       }
-      // Reset tool message tracker when new text appears (new response phase).
-      // In non-yolo mode canUseTool manages the tool message exclusively,
-      // so only reset on hasText when yolo (streaming handler owns the message).
-      if (hasText && isYolo) resetToolMsg();
+      if (hasText && isYolo) toolCtrl.reset();
       if (newBlocks.length > 0) {
-        // Deduplicate: SDK streaming may re-yield the same tool_use blocks
-        for (const nb of newBlocks) {
-          if (!toolBlocks.some(b => b.toolUseId === nb.toolUseId)) {
-            toolBlocks.push(nb);
-          }
-        }
-        // Only send/edit tool message from streaming handler in yolo mode.
-        // In non-yolo mode, canUseTool reveals blocks via toolMsgRef.
-        if (isYolo) {
-          const rendered = renderToolBlocks();
-          if (rendered) {
-            if (toolMsgId) {
-              await editMessageText(ctx.telegram, chatId, toolMsgId, rendered, { parseMode: "HTML" }).catch(() => {
-                toolMsgId = null;
-              });
-            }
-            if (!toolMsgId) {
-              toolMsgId = await sendMessage(ctx.telegram, chatId, rendered, {
-                replyToMessageId: messageId,
-                parseMode: "HTML",
-              });
-            }
-          }
-        }
+        toolCtrl.addBlocks(newBlocks);
+        if (isYolo) await toolCtrl.sendOrUpdate();
       }
     }
 
@@ -694,7 +844,7 @@ async function streamResponse(
 
     if (isResult(msg)) {
       gotResult = true;
-      resetToolMsg();
+      toolCtrl.reset();
       if (!suppressed && isResultError(msg) && msg.errors && !wasSessionInterrupted(sessionId)) {
         const errText = rewriteSdkError(msg.errors.join("\n"));
         await sendMessage(ctx.telegram, chatId, `Error: ${escapeHtml(errText)}`, { replyToMessageId: messageId });
