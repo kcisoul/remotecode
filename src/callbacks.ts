@@ -212,14 +212,9 @@ export function registerScannerDismiss(fn: ScannerDismissFn): void {
 
 type VoidFn = () => void;
 let watcherDismissAsUserRef: VoidFn | null = null;
-let scannerDismissAsUserRef: ScannerDismissFn | null = null;
 
 export function registerWatcherDismissAsUser(fn: VoidFn): void {
   watcherDismissAsUserRef = fn;
-}
-
-export function registerScannerDismissAsUser(fn: ScannerDismissFn): void {
-  scannerDismissAsUserRef = fn;
 }
 
 // ---------- per-session perm-denied flag (prevents queued canUseTool from showing dialogs after deny) ----------
@@ -421,12 +416,6 @@ async function handleTakeoverCallback(
 
   if (action === "dismiss") {
     watcherDismissAsUserRef?.();
-    return;
-  }
-
-  if (action.startsWith("dismiss:")) {
-    const dismissSessionId = action.slice("dismiss:".length);
-    scannerDismissAsUserRef?.(dismissSessionId);
     return;
   }
 

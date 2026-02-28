@@ -30,9 +30,9 @@ import {
 import { sessionsReplyKeyboard } from "./session-ui";
 import { handleCommand } from "./commands";
 import { HandlerContext, isUserAllowed, activeQueries } from "./context";
-import { registerPendingAsk, registerPendingPerm, denyAllPending, hasPendingPerms, hasPendingAsks, resolveAsksWithText, consumePendingInput, isPermDenied, clearPermDenied, stopOldSession, registerTakeoverHandler, registerWatcherCleanup, registerScannerDismiss, registerWatcherDismissAsUser, registerScannerDismissAsUser } from "./callbacks";
+import { registerPendingAsk, registerPendingPerm, denyAllPending, hasPendingPerms, hasPendingAsks, resolveAsksWithText, consumePendingInput, isPermDenied, clearPermDenied, stopOldSession, registerTakeoverHandler, registerWatcherCleanup, registerScannerDismiss, registerWatcherDismissAsUser } from "./callbacks";
 import { isSttReady, isMacOS, transcribeAudio } from "./stt";
-import { skipToEnd, clearWatcherPermState, getPendingToolUses, dismissScannerNotification, dismissWatcherAsUser, dismissScannerAsUser, continueWatcherInTelegram, continueScannerInTelegram } from "./watcher";
+import { skipToEnd, clearWatcherPermState, getPendingToolUses, dismissScannerNotification, dismissWatcherAsUser, continueWatcherInTelegram, continueScannerInTelegram } from "./watcher";
 import { isAssistantMessage, isSystemInit, isTaskStarted, isTaskNotification, isResult, isResultError } from "./sdk-types";
 import { matchCliPermissions } from "./permissions";
 import {
@@ -120,7 +120,7 @@ async function handleTakeover(
 
   // Send feedback notification
   const promptPreview = escapeHtml(lastPrompt.length > 300 ? lastPrompt.slice(0, 300) + "…" : lastPrompt);
-  const feedbackText = `Syncing session context. Re-sending last message to Claude.\n<blockquote>${promptPreview}</blockquote>\nWaiting for response...`;
+  const feedbackText = `Syncing session context.\nRe-sending last message to Claude.\n\n<blockquote>${promptPreview}</blockquote>\n\nWaiting for response...`;
   let replyId = messageId;
   try {
     replyId = await sendMessage(ctx.telegram, chatId, feedbackText, {
@@ -139,7 +139,6 @@ registerTakeoverHandler(handleTakeover);
 registerWatcherCleanup(clearWatcherPermState);
 registerScannerDismiss(dismissScannerNotification);
 registerWatcherDismissAsUser(dismissWatcherAsUser);
-registerScannerDismissAsUser(dismissScannerAsUser);
 
 // ---------- unauthorized tracking ----------
 const warnedUsers = new Set<string>();
@@ -775,7 +774,7 @@ async function streamResponse(
     flush: async () => {
       if (isSessionSuppressed(sessionId)) return;
       if (textParts.length === 0) return;
-      const text = stripThinking(textParts.join("\n"));
+      const text = stripThinking(textParts.join("\n\n"));
       if (!text) return;
       const formatted = tryMdToHtml(text);
       await sendMessage(ctx.telegram, chatId, formatted.text, {
@@ -862,7 +861,7 @@ async function sendFinalResponse(
   ctx: HandlerContext,
   voiceMode?: boolean,
 ): Promise<void> {
-  const fullText = stripThinking(textParts.join("\n"));
+  const fullText = stripThinking(textParts.join("\n\n"));
   if (!fullText) return;
 
   if (voiceMode) {

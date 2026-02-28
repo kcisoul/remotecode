@@ -429,6 +429,7 @@ interface ScannerState {
   chatId: number | null;
   sessionsFile: string | null;
   notified: Map<string, ScannerNotification>; // sessionId → notification
+  suppressed: Set<string>; // sessionIds dismissed/continued — suppress until resolved
 }
 
 const scanner: ScannerState = {
@@ -437,6 +438,7 @@ const scanner: ScannerState = {
   chatId: null,
   sessionsFile: null,
   notified: new Map(),
+  suppressed: new Set(),
 };
 
 interface ScanResult {
@@ -536,6 +538,8 @@ function runScannerTick(): void {
     if (now - file.mtimeMs < SCANNER_STALE_THRESHOLD_MS) continue;
     // Skip if already notified
     if (scanner.notified.has(file.sessionId)) continue;
+    // Skip if user dismissed/continued — wait until resolved before re-notifying
+    if (scanner.suppressed.has(file.sessionId)) continue;
 
     const scan = scanSessionTail(file.filePath);
     if (scan.pendingTools.length === 0) continue;
@@ -553,16 +557,20 @@ function runScannerTick(): void {
     const text = `<blockquote>Notification</blockquote>\nPermission pending in another session\nProject: <b>${escapeHtml(displayPath)}</b>\n${inputLine}\n<b>Pending:</b>\n${desc}${countLabel}`;
     const buttons = [
       [{ text: "📱 Continue in Telegram", callback_data: `takeover:${file.sessionId}` }],
-      [{ text: "✖ Dismiss", callback_data: `takeover:dismiss:${file.sessionId}` }],
     ];
+
+    // Register immediately to prevent duplicate notifications on next tick
+    scanner.notified.set(file.sessionId, { msgId: 0, text });
 
     sendMessage(telegram, chatId, text, {
       parseMode: "HTML",
       replyMarkup: { inline_keyboard: buttons },
     }).then((msgId) => {
-      scanner.notified.set(file.sessionId, { msgId, text });
+      const existing = scanner.notified.get(file.sessionId);
+      if (existing) existing.msgId = msgId;
     }).catch((err) => {
       logger.error("scanner", `sendMessage error: ${errorMessage(err)}`);
+      scanner.notified.delete(file.sessionId);
     });
   }
 
@@ -596,6 +604,19 @@ function runScannerTick(): void {
       scanner.notified.delete(sessionId);
     }
   }
+
+  // Clear suppressed sessions once their pending tools are resolved
+  for (const sessionId of [...scanner.suppressed]) {
+    const file = recentFiles.find(f => f.sessionId === sessionId);
+    if (!file) {
+      scanner.suppressed.delete(sessionId);
+      continue;
+    }
+    const scan = scanSessionTail(file.filePath);
+    if (scan.pendingTools.length === 0) {
+      scanner.suppressed.delete(sessionId);
+    }
+  }
 }
 
 export function startGlobalScanner(telegram: TelegramConfig, sessionsFile: string): void {
@@ -605,6 +626,18 @@ export function startGlobalScanner(telegram: TelegramConfig, sessionsFile: strin
   // Read chat ID from sessions file
   const chatIdRaw = readKvFile(sessionsFile).REMOTECODE_CHAT_ID;
   scanner.chatId = chatIdRaw ? parseInt(chatIdRaw, 10) || null : null;
+
+  // Seed suppressed with already-pending sessions to avoid re-notifying on restart
+  const recentFiles = listRecentSessionFiles(SCANNER_MAX_FILE_AGE_MS);
+  for (const file of recentFiles) {
+    const scan = scanSessionTail(file.filePath);
+    if (scan.pendingTools.length > 0) {
+      scanner.suppressed.add(file.sessionId);
+    }
+  }
+  if (scanner.suppressed.size > 0) {
+    logger.info("scanner", `seeded ${scanner.suppressed.size} suppressed session(s) on start`);
+  }
 
   scanner.timer = setInterval(() => {
     // Refresh chatId each tick in case it changes
@@ -623,6 +656,7 @@ export function stopGlobalScanner(): void {
     scanner.timer = null;
   }
   scanner.notified.clear();
+  scanner.suppressed.clear();
   logger.info("scanner", "global session scanner stopped");
 }
 
@@ -636,17 +670,6 @@ export function dismissScannerNotification(sessionId: string): void {
   scanner.notified.delete(sessionId);
 }
 
-/** Dismiss scanner notification with status text (keeps original content). */
-export function dismissScannerAsUser(sessionId: string): void {
-  const notif = scanner.notified.get(sessionId);
-  if (notif && scanner.telegram && scanner.chatId) {
-    const text = `${notif.text}\n\n✖ Dismissed`;
-    silentCatch("scanner", "dismissScannerAsUser",
-      editMessageText(scanner.telegram, scanner.chatId, notif.msgId, text, { parseMode: "HTML" }));
-  }
-  scanner.notified.delete(sessionId);
-}
-
 /** Mark scanner notification as continuing in Telegram (keeps original content). */
 export function continueScannerInTelegram(sessionId: string): void {
   const notif = scanner.notified.get(sessionId);
@@ -656,4 +679,5 @@ export function continueScannerInTelegram(sessionId: string): void {
       editMessageText(scanner.telegram, scanner.chatId, notif.msgId, text, { parseMode: "HTML" }));
   }
   scanner.notified.delete(sessionId);
+  scanner.suppressed.add(sessionId);
 }
