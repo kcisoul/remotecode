@@ -16,7 +16,7 @@ import {
 import { querySession, closeSession, wasSessionInterrupted, markSessionStale, type CanUseToolFn, type MessageContent } from "./claude";
 import { mdToTelegramHtml, escapeHtml, tryMdToHtml, truncateMessage, stripThinking, formatToolDescription } from "./format";
 import { logger, errorMessage, silentCatch, silentTry } from "./logger";
-import { defaultCwd, whisperModelPath, SILENT_TOOLS } from "./config";
+import { defaultCwd, whisperModelPath, SILENT_TOOLS, discoverSkills } from "./config";
 import {
   getOrCreateSessionId,
   loadSessionCwd,
@@ -43,6 +43,40 @@ import {
   updateReplyTarget, getReplyTarget, clearReplyTarget,
   type QueuedMessage,
 } from "./session-state";
+
+// ---------- skill loading ----------
+/** Cached skill map: name → SKILL.md path. Rebuilt lazily. */
+let skillCache: Map<string, string> | null = null;
+
+function getSkillMap(): Map<string, string> {
+  if (!skillCache) {
+    skillCache = new Map();
+    for (const skill of discoverSkills()) {
+      skillCache.set(skill.name.toLowerCase(), skill.skillMdPath);
+    }
+  }
+  return skillCache;
+}
+
+/** Look for a skill SKILL.md (from ~/.claude/skills/ or enabled plugins) and build a prompt. */
+function loadSkillPrompt(skillName: string, args: string): string {
+  const map = getSkillMap();
+  const skillMd = map.get(skillName.toLowerCase());
+  if (skillMd) {
+    try {
+      const content = fs.readFileSync(skillMd, "utf-8");
+      return args
+        ? `<skill-prompt>\n${content}\n</skill-prompt>\n\nUser request: ${args}`
+        : `<skill-prompt>\n${content}\n</skill-prompt>\n\nRun this skill with default behavior.`;
+    } catch (err) {
+      logger.debug("skill", `Failed to load skill ${skillName}: ${errorMessage(err)}`);
+    }
+  }
+  // Fallback: ask Claude to invoke via Skill tool
+  return args
+    ? `Use the Skill tool to invoke the "${skillName}" skill with args: "${args}".`
+    : `Use the Skill tool to invoke the "${skillName}" skill.`;
+}
 
 // ---------- SDK error message rewriting ----------
 /** Rewrite SDK error messages that reference CLI commands (e.g. /login) which don't exist in Telegram. */
@@ -528,6 +562,19 @@ async function handleTextMessage(msg: Message, ctx: HandlerContext): Promise<voi
 
     // Commands always handled immediately (regardless of busy state)
     if (await handleCommand(text, chatId, messageId, ctx)) return;
+
+    // Unrecognized /commands → load skill SKILL.md if available, else forward as skill invocation
+    if (text.startsWith("/")) {
+      const [rawCmd, ...rest] = text.split(/\s+/);
+      const skillName = rawCmd.split("@")[0].slice(1);
+      if (skillName) {
+        const args = rest.join(" ").trim();
+        const skillPrompt = loadSkillPrompt(skillName, args);
+        await handlePrompt(skillPrompt, chatId, messageId, ctx);
+        return;
+      }
+    }
+
     await handlePrompt(text, chatId, messageId, ctx);
   } catch (err) {
     logger.error("handler", `Error in handleTextMessage: ${errorMessage(err)}`, err);
