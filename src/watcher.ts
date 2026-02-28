@@ -1,7 +1,8 @@
 import * as fs from "fs";
 import { TelegramConfig, sendMessage, editMessageText, deleteMessage } from "./telegram";
-import { tryMdToHtml, truncateMessage, formatToolDescription } from "./format";
-import { UUID_RE, findSessionFilePath } from "./sessions";
+import { tryMdToHtml, truncateMessage, formatToolDescription, escapeHtml } from "./format";
+import * as os from "os";
+import { UUID_RE, findSessionFilePath, listRecentSessionFiles, decodeProjectPath, loadActiveSessionId } from "./sessions";
 import { extractMessageContent, parseJsonlLines } from "./jsonl";
 import { readKvFile, readEnvLines, writeEnvLines } from "./config";
 import { activeQueries } from "./context";
@@ -33,6 +34,7 @@ interface WatcherState {
   pendingToolUses: Map<string, { toolName: string; input: Record<string, unknown> }>;
   permCheckTimer: ReturnType<typeof setTimeout> | null;
   permNotifyMsgId: number | null;
+  permNotifyText: string | null;
   telegram: TelegramConfig | null;
   lastChatId: number | null;
 }
@@ -49,6 +51,7 @@ const state: WatcherState = {
   pendingToolUses: new Map(),
   permCheckTimer: null,
   permNotifyMsgId: null,
+  permNotifyText: null,
   telegram: null,
   lastChatId: null,
 };
@@ -194,6 +197,7 @@ function clearPermState(): void {
     state.permCheckTimer = null;
   }
   state.permNotifyMsgId = null;
+  state.permNotifyText = null;
 }
 
 function schedulePermCheck(): void {
@@ -218,10 +222,10 @@ function checkPendingPerms(): void {
   const desc = formatToolDescription(first.toolName, first.input);
   const count = state.pendingToolUses.size;
   const countLabel = count > 1 ? `\n+${count - 1} more pending tool(s)` : "";
-  const text = `<b>[sync] Permission pending on host</b>\n${desc}${countLabel}`;
+  const text = `<b>[sync] Permission pending on host</b>\n\n${desc}${countLabel}`;
   const sessionId = state.currentSessionId;
   const buttons = [
-    [{ text: "📱 Take over session", callback_data: `takeover:${sessionId}` }],
+    [{ text: "📱 Continue in Telegram", callback_data: `takeover:${sessionId}` }],
     [{ text: "✖ Dismiss", callback_data: "takeover:dismiss" }],
   ];
 
@@ -230,6 +234,7 @@ function checkPendingPerms(): void {
     replyMarkup: { inline_keyboard: buttons },
   }).then((msgId) => {
     state.permNotifyMsgId = msgId;
+    state.permNotifyText = text;
   }).catch((err) => {
     logger.error("watcher", `sendPermNotification error: ${errorMessage(err)}`);
   });
@@ -237,8 +242,11 @@ function checkPendingPerms(): void {
 
 function dismissPermNotification(): void {
   if (state.permNotifyMsgId && state.telegram && state.lastChatId) {
+    const resolvedText = state.permNotifyText
+      ? `${state.permNotifyText}\n\n✓ Resolved in Claude Code on host`
+      : "✓ Resolved in Claude Code on host";
     silentCatch("watcher", "dismissPermNotification",
-      editMessageText(state.telegram, state.lastChatId, state.permNotifyMsgId, "✓ Resolved by host"));
+      editMessageText(state.telegram, state.lastChatId, state.permNotifyMsgId, resolvedText, { parseMode: "HTML" }));
   }
   clearPermState();
 }
@@ -246,6 +254,30 @@ function dismissPermNotification(): void {
 /** Get a snapshot of pending tool uses (for takeover display). */
 export function getPendingToolUses(): Array<{ toolName: string; input: Record<string, unknown> }> {
   return [...state.pendingToolUses.values()];
+}
+
+/** Dismiss watcher permission notification with status text (keeps original content). */
+export function dismissWatcherAsUser(): void {
+  if (state.permNotifyMsgId && state.telegram && state.lastChatId) {
+    const text = state.permNotifyText
+      ? `${state.permNotifyText}\n\n✖ Dismissed`
+      : "✖ Dismissed";
+    silentCatch("watcher", "dismissWatcherAsUser",
+      editMessageText(state.telegram, state.lastChatId, state.permNotifyMsgId, text, { parseMode: "HTML" }));
+  }
+  clearPermState();
+}
+
+/** Mark watcher notification as continuing in Telegram (keeps original content). */
+export function continueWatcherInTelegram(): void {
+  if (state.permNotifyMsgId && state.telegram && state.lastChatId) {
+    const text = state.permNotifyText
+      ? `${state.permNotifyText}\n\n✓ Continuing in Telegram`
+      : "✓ Continuing in Telegram";
+    silentCatch("watcher", "continueWatcherInTelegram",
+      editMessageText(state.telegram, state.lastChatId, state.permNotifyMsgId, text, { parseMode: "HTML" }));
+  }
+  clearPermState();
 }
 
 /** Clear watcher permission state from outside (e.g. takeover callback). */
@@ -371,4 +403,257 @@ export function stopWatcher(): void {
     state.debounceTimer = null;
   }
   logger.info("watcher", "stopped");
+}
+
+// ===================================================================
+// Global Session Scanner — detect pending permissions across all sessions
+// ===================================================================
+
+const SCANNER_INTERVAL_MS = 10_000;
+const SCANNER_MAX_FILE_AGE_MS = 300_000;
+const SCANNER_STALE_THRESHOLD_MS = 30_000;
+
+interface PendingToolInfo {
+  toolName: string;
+  input: Record<string, unknown>;
+}
+
+interface ScannerNotification {
+  msgId: number;
+  text: string; // original message text (for appending resolved status)
+}
+
+interface ScannerState {
+  timer: ReturnType<typeof setInterval> | null;
+  telegram: TelegramConfig | null;
+  chatId: number | null;
+  sessionsFile: string | null;
+  notified: Map<string, ScannerNotification>; // sessionId → notification
+}
+
+const scanner: ScannerState = {
+  timer: null,
+  telegram: null,
+  chatId: null,
+  sessionsFile: null,
+  notified: new Map(),
+};
+
+interface ScanResult {
+  pendingTools: PendingToolInfo[];
+  lastUserInput: string | null;
+}
+
+function scanSessionTail(filePath: string): ScanResult {
+  let fd: number;
+  try {
+    fd = fs.openSync(filePath, "r");
+  } catch { return { pendingTools: [], lastUserInput: null }; }
+
+  let chunk: string;
+  try {
+    const stat = fs.fstatSync(fd);
+    const size = stat.size;
+    const readSize = Math.min(size, 65536);
+    const buf = Buffer.alloc(readSize);
+    fs.readSync(fd, buf, 0, readSize, size - readSize);
+    chunk = buf.toString("utf-8");
+  } catch {
+    try { fs.closeSync(fd); } catch { /* */ }
+    return { pendingTools: [], lastUserInput: null };
+  }
+  try { fs.closeSync(fd); } catch { /* */ }
+
+  // Track tool_use / tool_result to find unresolved tool_use at end of file
+  const pending = new Map<string, PendingToolInfo>();
+  let lastUserInput: string | null = null;
+
+  for (const entry of parseJsonlLines(chunk, "scanner")) {
+    const type = entry.type as string;
+    if (type !== "assistant" && type !== "user") continue;
+
+    const msgObj = entry.message as Record<string, unknown> | undefined;
+    const content = msgObj?.content;
+
+    // Track last real user input (not tool_result, not meta)
+    if (type === "user" && !entry.isMeta && !entry.toolUseResult) {
+      if (Array.isArray(content) && content.length > 0 &&
+          (content[0] as Record<string, unknown>)?.type === "tool_result") {
+        // tool_result — skip for user input but still process for pending tracking
+      } else {
+        const text = extractMessageContent(content).trim();
+        if (text && !text.startsWith("<")) lastUserInput = text;
+      }
+    }
+
+    if (!Array.isArray(content)) continue;
+
+    if (type === "user") {
+      for (const block of content) {
+        const b = block as Record<string, unknown>;
+        if (b.type === "tool_result" && typeof b.tool_use_id === "string") {
+          pending.delete(b.tool_use_id);
+        }
+      }
+    }
+
+    if (type === "assistant") {
+      for (const block of content) {
+        const b = block as Record<string, unknown>;
+        if (b.type === "tool_use" && typeof b.id === "string") {
+          pending.set(b.id, {
+            toolName: (b.name as string) || "Unknown",
+            input: (b.input as Record<string, unknown>) || {},
+          });
+        }
+      }
+    }
+  }
+
+  return { pendingTools: [...pending.values()], lastUserInput };
+}
+
+function runScannerTick(): void {
+  if (!scanner.telegram || !scanner.chatId || !scanner.sessionsFile) return;
+
+  const telegram = scanner.telegram;
+  const chatId = scanner.chatId;
+  const now = Date.now();
+
+  const activeSessionId = loadActiveSessionId(scanner.sessionsFile);
+  const recentFiles = listRecentSessionFiles(SCANNER_MAX_FILE_AGE_MS);
+
+  const seenSessionIds = new Set<string>();
+
+  for (const file of recentFiles) {
+    seenSessionIds.add(file.sessionId);
+
+    // Skip currently selected session (handled by watcher)
+    if (file.sessionId === activeSessionId) continue;
+    // Skip sessions with active SDK queries
+    if (activeQueries.has(file.sessionId)) continue;
+    // Skip if not old enough to be considered stale
+    if (now - file.mtimeMs < SCANNER_STALE_THRESHOLD_MS) continue;
+    // Skip if already notified
+    if (scanner.notified.has(file.sessionId)) continue;
+
+    const scan = scanSessionTail(file.filePath);
+    if (scan.pendingTools.length === 0) continue;
+
+    // Build notification with full project path + last input + pending tool
+    const decoded = decodeProjectPath(file.encodedDir);
+    const home = os.homedir();
+    const displayPath = decoded.startsWith(home) ? "~" + decoded.slice(home.length) : decoded;
+    const first = scan.pendingTools[0];
+    const desc = formatToolDescription(first.toolName, first.input);
+    const countLabel = scan.pendingTools.length > 1 ? `\n+${scan.pendingTools.length - 1} more pending tool(s)` : "";
+    const inputLine = scan.lastUserInput
+      ? `\n<b>You:</b>\n<blockquote>${escapeHtml(scan.lastUserInput.length > 200 ? scan.lastUserInput.slice(0, 200) + "…" : scan.lastUserInput)}</blockquote>\n`
+      : "\n";
+    const text = `<blockquote>Notification</blockquote>\nPermission pending in another session\nProject: <b>${escapeHtml(displayPath)}</b>\n${inputLine}\n<b>Pending:</b>\n${desc}${countLabel}`;
+    const buttons = [
+      [{ text: "📱 Continue in Telegram", callback_data: `takeover:${file.sessionId}` }],
+      [{ text: "✖ Dismiss", callback_data: `takeover:dismiss:${file.sessionId}` }],
+    ];
+
+    sendMessage(telegram, chatId, text, {
+      parseMode: "HTML",
+      replyMarkup: { inline_keyboard: buttons },
+    }).then((msgId) => {
+      scanner.notified.set(file.sessionId, { msgId, text });
+    }).catch((err) => {
+      logger.error("scanner", `sendMessage error: ${errorMessage(err)}`);
+    });
+  }
+
+  // Check previously notified sessions — if resolved, append status to original message
+  for (const [sessionId, notif] of [...scanner.notified.entries()]) {
+    // Skip sessions we just notified this tick
+    if (!seenSessionIds.has(sessionId)) {
+      // Session file no longer recent — dismiss silently
+      silentCatch("scanner", "deleteStaleNotification", deleteMessage(telegram, chatId, notif.msgId));
+      scanner.notified.delete(sessionId);
+      continue;
+    }
+
+    // Skip currently selected session (takeover already handles this)
+    if (sessionId === activeSessionId) {
+      scanner.notified.delete(sessionId);
+      continue;
+    }
+
+    // Re-scan to check if still pending
+    const file = recentFiles.find(f => f.sessionId === sessionId);
+    if (!file) {
+      scanner.notified.delete(sessionId);
+      continue;
+    }
+    const scan = scanSessionTail(file.filePath);
+    if (scan.pendingTools.length === 0) {
+      const resolvedText = `${notif.text}\n\n✓ Resolved in Claude Code on host`;
+      silentCatch("scanner", "editResolved",
+        editMessageText(telegram, chatId, notif.msgId, resolvedText, { parseMode: "HTML" }));
+      scanner.notified.delete(sessionId);
+    }
+  }
+}
+
+export function startGlobalScanner(telegram: TelegramConfig, sessionsFile: string): void {
+  scanner.telegram = telegram;
+  scanner.sessionsFile = sessionsFile;
+
+  // Read chat ID from sessions file
+  const chatIdRaw = readKvFile(sessionsFile).REMOTECODE_CHAT_ID;
+  scanner.chatId = chatIdRaw ? parseInt(chatIdRaw, 10) || null : null;
+
+  scanner.timer = setInterval(() => {
+    // Refresh chatId each tick in case it changes
+    const raw = readKvFile(scanner.sessionsFile!).REMOTECODE_CHAT_ID;
+    scanner.chatId = raw ? parseInt(raw, 10) || null : null;
+
+    runScannerTick();
+  }, SCANNER_INTERVAL_MS);
+
+  logger.info("scanner", "global session scanner started");
+}
+
+export function stopGlobalScanner(): void {
+  if (scanner.timer) {
+    clearInterval(scanner.timer);
+    scanner.timer = null;
+  }
+  scanner.notified.clear();
+  logger.info("scanner", "global session scanner stopped");
+}
+
+/** Remove scanner notification (used when taking over — notification replaced by takeover flow). */
+export function dismissScannerNotification(sessionId: string): void {
+  const notif = scanner.notified.get(sessionId);
+  if (notif && scanner.telegram && scanner.chatId) {
+    silentCatch("scanner", "dismissNotification",
+      deleteMessage(scanner.telegram, scanner.chatId, notif.msgId));
+  }
+  scanner.notified.delete(sessionId);
+}
+
+/** Dismiss scanner notification with status text (keeps original content). */
+export function dismissScannerAsUser(sessionId: string): void {
+  const notif = scanner.notified.get(sessionId);
+  if (notif && scanner.telegram && scanner.chatId) {
+    const text = `${notif.text}\n\n✖ Dismissed`;
+    silentCatch("scanner", "dismissScannerAsUser",
+      editMessageText(scanner.telegram, scanner.chatId, notif.msgId, text, { parseMode: "HTML" }));
+  }
+  scanner.notified.delete(sessionId);
+}
+
+/** Mark scanner notification as continuing in Telegram (keeps original content). */
+export function continueScannerInTelegram(sessionId: string): void {
+  const notif = scanner.notified.get(sessionId);
+  if (notif && scanner.telegram && scanner.chatId) {
+    const text = `${notif.text}\n\n✓ Continuing in Telegram`;
+    silentCatch("scanner", "continueScannerInTelegram",
+      editMessageText(scanner.telegram, scanner.chatId, notif.msgId, text, { parseMode: "HTML" }));
+  }
+  scanner.notified.delete(sessionId);
 }

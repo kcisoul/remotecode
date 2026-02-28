@@ -84,11 +84,45 @@ function resolvePathSegments(base: string, segments: string[]): string {
   return resolvePathSegments(fallback, rest);
 }
 
-function projectDisplayName(encodedDir: string): string {
+export function projectDisplayName(encodedDir: string): string {
   const decoded = decodeProjectPath(encodedDir);
   const home = os.homedir();
   if (decoded.replace(/\/$/, "") === home.replace(/\/$/, "")) return "~/";
   return decoded.replace(/\/$/, "").split("/").pop() || decoded;
+}
+
+// ---------- lightweight session file scanner ----------
+export interface RecentSessionFile {
+  filePath: string;
+  sessionId: string;
+  encodedDir: string;
+  mtimeMs: number;
+}
+
+export function listRecentSessionFiles(maxAgeMs: number): RecentSessionFile[] {
+  const pDir = projectsDir();
+  if (!fs.existsSync(pDir)) return [];
+  const now = Date.now();
+  const results: RecentSessionFile[] = [];
+  try {
+    for (const dir of fs.readdirSync(pDir)) {
+      const dirPath = path.join(pDir, dir);
+      if (!fs.statSync(dirPath).isDirectory()) continue;
+      if (dir === "memory") continue;
+      try {
+        for (const file of fs.readdirSync(dirPath)) {
+          if (!file.endsWith(".jsonl")) continue;
+          const name = file.slice(0, -6);
+          if (!UUID_RE.test(name)) continue;
+          const filePath = path.join(dirPath, file);
+          const mtimeMs = fs.statSync(filePath).mtimeMs;
+          if (now - mtimeMs > maxAgeMs) continue;
+          results.push({ filePath, sessionId: name, encodedDir: dir, mtimeMs });
+        }
+      } catch { /* skip unreadable dirs */ }
+    }
+  } catch { /* ignore */ }
+  return results;
 }
 
 // ---------- JSONL parsing ----------

@@ -16,7 +16,7 @@ import {
 import { handleMessage } from "./handler";
 import { handleCallbackQuery } from "./callbacks";
 import { HandlerContext } from "./context";
-import { startWatcher, stopWatcher } from "./watcher";
+import { startWatcher, stopWatcher, startGlobalScanner, stopGlobalScanner } from "./watcher";
 
 // ---------- PID management ----------
 export function readPid(): number | null {
@@ -301,8 +301,10 @@ export async function daemonMain(): Promise<void> {
 
   logger.info("daemon", "RemoteCode daemon ready.");
   startWatcher(telegramConfig, sessionsFile);
+  startGlobalScanner(telegramConfig, sessionsFile);
 
   const shutdown = () => {
+    stopGlobalScanner();
     stopWatcher();
     removePid();
     logger.info("daemon", "Daemon shutting down...");

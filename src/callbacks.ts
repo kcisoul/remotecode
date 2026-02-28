@@ -203,6 +203,25 @@ export function registerWatcherCleanup(fn: WatcherCleanupFn): void {
   clearWatcherPermStateRef = fn;
 }
 
+type ScannerDismissFn = (sessionId: string) => void;
+let scannerDismissRef: ScannerDismissFn | null = null;
+
+export function registerScannerDismiss(fn: ScannerDismissFn): void {
+  scannerDismissRef = fn;
+}
+
+type VoidFn = () => void;
+let watcherDismissAsUserRef: VoidFn | null = null;
+let scannerDismissAsUserRef: ScannerDismissFn | null = null;
+
+export function registerWatcherDismissAsUser(fn: VoidFn): void {
+  watcherDismissAsUserRef = fn;
+}
+
+export function registerScannerDismissAsUser(fn: ScannerDismissFn): void {
+  scannerDismissAsUserRef = fn;
+}
+
 // ---------- per-session perm-denied flag (prevents queued canUseTool from showing dialogs after deny) ----------
 const permDenied = new Set<string>();
 
@@ -401,17 +420,18 @@ async function handleTakeoverCallback(
   const action = data.slice("takeover:".length);
 
   if (action === "dismiss") {
-    silentCatch("callback", "deleteMessage takeover:dismiss", deleteMessage(ctx.telegram, chatId, messageId));
-    clearWatcherPermStateRef?.();
+    watcherDismissAsUserRef?.();
     return;
   }
 
-  // action is sessionId
-  const sessionId = action;
+  if (action.startsWith("dismiss:")) {
+    const dismissSessionId = action.slice("dismiss:".length);
+    scannerDismissAsUserRef?.(dismissSessionId);
+    return;
+  }
 
-  // Edit the notification to show takeover in progress
-  silentCatch("callback", "editTakeover",
-    editMessageText(ctx.telegram, chatId, messageId, "📱 Taking over session..."));
+  // action is sessionId — takeover handler will update the notification
+  const sessionId = action;
 
   if (!takeoverHandler) {
     logger.error("callback", "takeover handler not registered");

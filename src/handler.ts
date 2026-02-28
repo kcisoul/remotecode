@@ -30,9 +30,9 @@ import {
 import { sessionsReplyKeyboard } from "./session-ui";
 import { handleCommand } from "./commands";
 import { HandlerContext, isUserAllowed, activeQueries } from "./context";
-import { registerPendingAsk, registerPendingPerm, denyAllPending, hasPendingPerms, hasPendingAsks, resolveAsksWithText, consumePendingInput, isPermDenied, clearPermDenied, stopOldSession, registerTakeoverHandler, registerWatcherCleanup } from "./callbacks";
+import { registerPendingAsk, registerPendingPerm, denyAllPending, hasPendingPerms, hasPendingAsks, resolveAsksWithText, consumePendingInput, isPermDenied, clearPermDenied, stopOldSession, registerTakeoverHandler, registerWatcherCleanup, registerScannerDismiss, registerWatcherDismissAsUser, registerScannerDismissAsUser } from "./callbacks";
 import { isSttReady, isMacOS, transcribeAudio } from "./stt";
-import { skipToEnd, clearWatcherPermState, getPendingToolUses } from "./watcher";
+import { skipToEnd, clearWatcherPermState, getPendingToolUses, dismissScannerNotification, dismissWatcherAsUser, dismissScannerAsUser, continueWatcherInTelegram, continueScannerInTelegram } from "./watcher";
 import { isAssistantMessage, isSystemInit, isTaskStarted, isTaskNotification, isResult, isResultError } from "./sdk-types";
 import { matchCliPermissions } from "./permissions";
 import {
@@ -102,6 +102,10 @@ async function handleTakeover(
   // Mark SDK session as stale so it recreates with resume: sessionId
   markSessionStale(sessionId);
 
+  // Mark notifications as "Continuing in Telegram" (keeps original content)
+  continueScannerInTelegram(sessionId);
+  continueWatcherInTelegram();
+
   // Resolve session CWD from the JSONL file metadata
   const session = findSession(sessionId);
   if (session) {
@@ -110,26 +114,22 @@ async function handleTakeover(
     saveSessionCwd(ctx.sessionsFile, session.project);
   }
 
-  // Show pending tool uses and get a valid replyToMessageId
-  // (the notification message will be deleted, so we need a new anchor)
-  const pendingTools = getPendingToolUses();
-  let replyId = messageId;
-  if (pendingTools.length > 0) {
-    const toolLines = pendingTools.map(t => formatToolDescription(t.toolName, t.input));
-    const text = `<b>Pending from host:</b>\n${toolLines.join("\n")}`;
-    try {
-      replyId = await sendMessage(ctx.telegram, chatId, text, { parseMode: "HTML" });
-    } catch {
-      replyId = await sendMessage(ctx.telegram, chatId, `Pending from host: ${pendingTools.map(t => t.toolName).join(", ")}`);
-    }
-  }
-
-  // Clear watcher permission notification (deletes the old notification message)
-  clearWatcherPermState();
-
   // Read the last user prompt from JSONL so the session continues naturally
   const lastPrompt = readLastUserPrompt(sessionId) || "continue";
   logger.debug("takeover", `resuming with prompt: ${lastPrompt.slice(0, 80)}`);
+
+  // Send feedback notification
+  const promptPreview = escapeHtml(lastPrompt.length > 300 ? lastPrompt.slice(0, 300) + "…" : lastPrompt);
+  const feedbackText = `Syncing session context. Re-sending last message to Claude.\n<blockquote>${promptPreview}</blockquote>\nWaiting for response...`;
+  let replyId = messageId;
+  try {
+    replyId = await sendMessage(ctx.telegram, chatId, feedbackText, {
+      parseMode: "HTML",
+      replyMarkup: sessionsReplyKeyboard(ctx.sessionsFile),
+    });
+  } catch (err) {
+    logger.debug("takeover", `feedback message send error: ${errorMessage(err)}`);
+  }
 
   // Resume via SDK — canUseTool is now active for permission dialogs
   await handlePrompt(lastPrompt, chatId, replyId, ctx);
@@ -137,6 +137,9 @@ async function handleTakeover(
 
 registerTakeoverHandler(handleTakeover);
 registerWatcherCleanup(clearWatcherPermState);
+registerScannerDismiss(dismissScannerNotification);
+registerWatcherDismissAsUser(dismissWatcherAsUser);
+registerScannerDismissAsUser(dismissScannerAsUser);
 
 // ---------- unauthorized tracking ----------
 const warnedUsers = new Set<string>();
@@ -256,7 +259,6 @@ class ToolMessageController {
   constructor(
     private telegram: TelegramConfig,
     private chatId: number,
-    private replyToId: number,
   ) {}
 
   reset(): void {
@@ -291,7 +293,6 @@ class ToolMessageController {
     }
     if (!this.msgId) {
       this.msgId = await sendMessage(this.telegram, this.chatId, rendered, {
-        replyToMessageId: this.replyToId,
         parseMode: "HTML",
       });
     }
@@ -332,7 +333,6 @@ class ToolMessageController {
         await editMessageText(this.telegram, this.chatId, this.msgId, rendered, { parseMode: "HTML" }).catch(() => {});
       } else {
         this.msgId = await sendMessage(this.telegram, this.chatId, rendered, {
-          replyToMessageId: this.replyToId,
           parseMode: "HTML",
         });
       }
@@ -458,7 +458,6 @@ function buildCanUseTool(ctx: HandlerContext, chatId: number, messageId: number,
       flushRef?.pauseTyping();
       try {
         const sentMsgId = await sendMessage(ctx.telegram, chatId, reason, {
-          replyToMessageId: messageId,
           parseMode: "HTML",
           replyMarkup: { inline_keyboard: buttons },
         });
@@ -770,7 +769,7 @@ async function streamResponse(
   let gotResult = false;
   const getReplyId = () => getReplyTarget(sessionId) ?? messageId;
 
-  const toolCtrl = new ToolMessageController(ctx.telegram, chatId, messageId);
+  const toolCtrl = new ToolMessageController(ctx.telegram, chatId);
 
   const flushRef: FlushRef = {
     flush: async () => {
@@ -780,7 +779,6 @@ async function streamResponse(
       if (!text) return;
       const formatted = tryMdToHtml(text);
       await sendMessage(ctx.telegram, chatId, formatted.text, {
-        replyToMessageId: getReplyId(),
         parseMode: formatted.parseMode,
       });
       textParts.length = 0;
