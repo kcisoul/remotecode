@@ -774,7 +774,7 @@ async function streamResponse(
     flush: async () => {
       if (isSessionSuppressed(sessionId)) return;
       if (textParts.length === 0) return;
-      const text = stripThinking(textParts.join("\n\n"));
+      const text = stripThinking(textParts.join("\n"));
       if (!text) return;
       const formatted = tryMdToHtml(text);
       await sendMessage(ctx.telegram, chatId, formatted.text, {
@@ -861,7 +861,7 @@ async function sendFinalResponse(
   ctx: HandlerContext,
   voiceMode?: boolean,
 ): Promise<void> {
-  const fullText = stripThinking(textParts.join("\n\n"));
+  const fullText = stripThinking(textParts.join("\n"));
   if (!fullText) return;
 
   if (voiceMode) {

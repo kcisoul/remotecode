@@ -466,53 +466,65 @@ function scanSessionTail(filePath: string): ScanResult {
   }
   try { fs.closeSync(fd); } catch { /* */ }
 
-  // Track tool_use / tool_result to find unresolved tool_use at end of file
-  const pending = new Map<string, PendingToolInfo>();
+  const entries = [...parseJsonlLines(chunk, "scanner")];
   let lastUserInput: string | null = null;
 
-  for (const entry of parseJsonlLines(chunk, "scanner")) {
+  // Collect last real user input (forward scan)
+  for (const entry of entries) {
     const type = entry.type as string;
-    if (type !== "assistant" && type !== "user") continue;
-
+    if (type !== "user" || entry.isMeta || entry.toolUseResult) continue;
     const msgObj = entry.message as Record<string, unknown> | undefined;
     const content = msgObj?.content;
+    if (Array.isArray(content) && content.length > 0 &&
+        (content[0] as Record<string, unknown>)?.type === "tool_result") continue;
+    const text = extractMessageContent(content).trim();
+    if (text && !text.startsWith("<")) lastUserInput = text;
+  }
 
-    // Track last real user input (not tool_result, not meta)
-    if (type === "user" && !entry.isMeta && !entry.toolUseResult) {
-      if (Array.isArray(content) && content.length > 0 &&
-          (content[0] as Record<string, unknown>)?.type === "tool_result") {
-        // tool_result — skip for user input but still process for pending tracking
-      } else {
-        const text = extractMessageContent(content).trim();
-        if (text && !text.startsWith("<")) lastUserInput = text;
-      }
-    }
+  // Find pending tools: only check the LAST assistant message.
+  // If it has tool_use blocks without subsequent tool_results → genuinely pending.
+  const pendingTools: PendingToolInfo[] = [];
+  let lastAssistantIdx = -1;
+  const toolUseIds = new Map<string, PendingToolInfo>();
 
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    if (entry.type !== "assistant") continue;
+    const msgObj = entry.message as Record<string, unknown> | undefined;
+    const content = msgObj?.content;
     if (!Array.isArray(content)) continue;
 
-    if (type === "user") {
+    for (const block of content) {
+      const b = block as Record<string, unknown>;
+      if (b.type === "tool_use" && typeof b.id === "string") {
+        toolUseIds.set(b.id, {
+          toolName: (b.name as string) || "Unknown",
+          input: (b.input as Record<string, unknown>) || {},
+        });
+      }
+    }
+    lastAssistantIdx = i;
+    break; // only check the very last assistant message
+  }
+
+  if (lastAssistantIdx >= 0 && toolUseIds.size > 0) {
+    // Remove tool_use IDs that have tool_results after the last assistant message
+    for (let i = lastAssistantIdx + 1; i < entries.length; i++) {
+      const entry = entries[i];
+      const msgObj = entry.message as Record<string, unknown> | undefined;
+      const content = msgObj?.content;
+      if (!Array.isArray(content)) continue;
       for (const block of content) {
         const b = block as Record<string, unknown>;
         if (b.type === "tool_result" && typeof b.tool_use_id === "string") {
-          pending.delete(b.tool_use_id);
+          toolUseIds.delete(b.tool_use_id);
         }
       }
     }
-
-    if (type === "assistant") {
-      for (const block of content) {
-        const b = block as Record<string, unknown>;
-        if (b.type === "tool_use" && typeof b.id === "string") {
-          pending.set(b.id, {
-            toolName: (b.name as string) || "Unknown",
-            input: (b.input as Record<string, unknown>) || {},
-          });
-        }
-      }
-    }
+    pendingTools.push(...toolUseIds.values());
   }
 
-  return { pendingTools: [...pending.values()], lastUserInput };
+  return { pendingTools, lastUserInput };
 }
 
 function runScannerTick(): void {
