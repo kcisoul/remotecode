@@ -502,8 +502,10 @@
       Control <span class="gradient">Claude&nbsp;Code</span> from&nbsp;anywhere
     </h1>
     <p>
-      Send prompts, switch sessions, share images, and dictate voice messages &mdash;
-      all through Telegram. Your local Claude Code, now in your pocket.
+      Handy to set up, powerful to use, and secure with no open ports.
+      Inherits your Claude Code permission policies as-is,
+      and gives you full control over every project and session on your host &mdash;
+      all from Telegram.
     </p>
     <div class="hero-buttons">
       <a href="https://github.com/kcisoul/remotecode" class="btn btn-primary">
@@ -525,7 +527,7 @@
     <h2 class="section-title">Everything you need, remotely</h2>
     <p class="section-desc">
       Works directly with your local Claude Code installation. Same sessions,
-      same project context, same history.
+      same projects, same context.
     </p>
     <div class="features-grid">
       <div class="feature-card">
@@ -557,6 +559,21 @@
         <div class="feature-icon">&#x1F512;</div>
         <h3>Access Control</h3>
         <p>Restrict access by Telegram user ID or username. Unauthorized users are silently blocked.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">&#x1F6E1;</div>
+        <h3>Smart Permissions</h3>
+        <p>Follows your host Claude Code permission rules automatically. Approve tools from Telegram with per-tool session-level control.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">&#x1F3AF;</div>
+        <h3>Session Takeover</h3>
+        <p>Started a task in the terminal and stepped away? If Claude is stuck waiting, open Telegram, see what it needs, and keep it going.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">&#x1F514;</div>
+        <h3>Cross-Session Scanner</h3>
+        <p>Running multiple sessions? Get notified when any of them needs your input, not just the one you're looking at.</p>
       </div>
     </div>
   </section>
@@ -624,6 +641,9 @@
           <tr><td>/projects</td><td>Browse sessions grouped by project directory</td></tr>
           <tr><td>/new</td><td>Start a new Claude Code session</td></tr>
           <tr><td>/history</td><td>Show conversation history of current session</td></tr>
+          <tr><td>/cancel</td><td>Cancel the current task</td></tr>
+          <tr><td>/resume</td><td>List sessions in the current project</td></tr>
+          <tr><td>/model</td><td>Switch Claude model (Sonnet / Opus / Haiku)</td></tr>
           <tr><td>/sync</td><td>Toggle auto-sync notifications</td></tr>
         </tbody>
       </table>

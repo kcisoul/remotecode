@@ -2,7 +2,7 @@
 
 Control [Claude Code](https://docs.anthropic.com/en/docs/claude-code) remotely through Telegram. Built specifically for Claude Code.
 
-RemoteCode works directly with your local Claude Code -- same sessions, same project context, same history. Pick up where you left off in the terminal, switch projects, or start a new session, all from Telegram.
+Handy to set up, powerful to use, and secure with no open ports. Inherits your Claude Code permission policies as-is, and gives you full control over every project and session on your host -- all from Telegram.
 
 ```
 You (Anywhere)  <-->  RemoteCode (Host)  <-->  Claude Code (Host)
@@ -17,6 +17,9 @@ You (Anywhere)  <-->  RemoteCode (Host)  <-->  Claude Code (Host)
 - **Auto-sync** -- Watch active session files and forward new messages in real-time
 - **Background daemon** -- Runs as a detached process with log rotation
 - **User access control** -- Restrict access by Telegram user ID or username
+- **Smart permissions** -- Follows your host Claude Code `settings.json` permission rules automatically. When a tool needs approval, you get the same Allow / Deny buttons on Telegram -- with per-tool "allow for session" so you don't have to tap the same thing twice
+- **Session takeover** -- Kicked off a task in the terminal and stepped away? If Claude is stuck waiting for permission or asking a question, open Telegram and pick up right where it stopped. You'll see exactly what it needs, tap to respond, and Claude keeps going
+- **Cross-session scanner** -- Running multiple sessions? RemoteCode watches all of them in the background. If any session is waiting for your input, you get a notification -- even if it's not the one you're currently looking at
 
 ## Demo
 
@@ -135,6 +138,7 @@ Send these as messages in your Telegram chat with the bot:
 | `/new` | Start a new Claude Code session |
 | `/history` | Show conversation history of current session |
 | `/cancel` | Cancel the current task |
+| `/resume` | List sessions in the current project |
 | `/model` | Switch Claude model (Sonnet / Opus / Haiku) |
 | `/sync` | Toggle auto-sync notifications on/off |
 
@@ -153,7 +157,10 @@ When YOLO mode is off, Claude Code tool actions trigger an inline keyboard:
 
 - **Allow** -- permit this single action
 - **Deny** -- reject and interrupt the task
+- **Allow for session** -- auto-allow this specific tool for the rest of the session
 - **Allow all** -- auto-allow all actions for the rest of this session (resets on session switch)
+
+Permission rules from your host Claude Code `settings.json` are respected automatically. If you've already configured tool permissions locally, RemoteCode follows the same rules.
 
 ## Message Types
 
