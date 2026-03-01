@@ -226,7 +226,6 @@ function checkPendingPerms(): void {
   const sessionId = state.currentSessionId;
   const buttons = [
     [{ text: "📱 Continue in Telegram", callback_data: `takeover:${sessionId}` }],
-    [{ text: "✖ Dismiss", callback_data: "takeover:dismiss" }],
   ];
 
   sendMessage(telegram, chatId, text, {
@@ -414,6 +413,7 @@ const SCANNER_MAX_FILE_AGE_MS = 300_000;
 const SCANNER_STALE_THRESHOLD_MS = 30_000;
 
 interface PendingToolInfo {
+  id: string;
   toolName: string;
   input: Record<string, unknown>;
 }
@@ -421,6 +421,8 @@ interface PendingToolInfo {
 interface ScannerNotification {
   msgId: number;
   text: string; // original message text (for appending resolved status)
+  pendingToolUseIds: string[]; // tool_use IDs that triggered this notification
+  filePath: string; // session JSONL file path (for resolution check even after file becomes stale)
 }
 
 interface ScannerState {
@@ -498,6 +500,7 @@ function scanSessionTail(filePath: string): ScanResult {
       const b = block as Record<string, unknown>;
       if (b.type === "tool_use" && typeof b.id === "string") {
         toolUseIds.set(b.id, {
+          id: b.id,
           toolName: (b.name as string) || "Unknown",
           input: (b.input as Record<string, unknown>) || {},
         });
@@ -525,6 +528,49 @@ function scanSessionTail(filePath: string): ScanResult {
   }
 
   return { pendingTools, lastUserInput };
+}
+
+/**
+ * Check if specific tool_use IDs have been resolved (have matching tool_results).
+ * Unlike scanSessionTail which relies on "last assistant message" heuristic,
+ * this directly checks for tool_result entries matching the given IDs.
+ */
+function areToolUsesResolved(filePath: string, toolUseIds: string[]): boolean {
+  if (toolUseIds.length === 0) return true;
+
+  let fd: number;
+  try {
+    fd = fs.openSync(filePath, "r");
+  } catch { return false; }
+
+  let chunk: string;
+  try {
+    const stat = fs.fstatSync(fd);
+    const size = stat.size;
+    const readSize = Math.min(size, 65536);
+    const buf = Buffer.alloc(readSize);
+    fs.readSync(fd, buf, 0, readSize, size - readSize);
+    chunk = buf.toString("utf-8");
+  } catch {
+    try { fs.closeSync(fd); } catch { /* */ }
+    return false;
+  }
+  try { fs.closeSync(fd); } catch { /* */ }
+
+  const remaining = new Set(toolUseIds);
+  for (const entry of parseJsonlLines(chunk, "scanner")) {
+    const msgObj = entry.message as Record<string, unknown> | undefined;
+    const content = msgObj?.content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content) {
+      const b = block as Record<string, unknown>;
+      if (b.type === "tool_result" && typeof b.tool_use_id === "string") {
+        remaining.delete(b.tool_use_id);
+      }
+    }
+  }
+
+  return remaining.size === 0;
 }
 
 function runScannerTick(): void {
@@ -572,7 +618,12 @@ function runScannerTick(): void {
     ];
 
     // Register immediately to prevent duplicate notifications on next tick
-    scanner.notified.set(file.sessionId, { msgId: 0, text });
+    scanner.notified.set(file.sessionId, {
+      msgId: 0,
+      text,
+      pendingToolUseIds: scan.pendingTools.map(t => t.id),
+      filePath: file.filePath,
+    });
 
     sendMessage(telegram, chatId, text, {
       parseMode: "HTML",
@@ -589,27 +640,26 @@ function runScannerTick(): void {
   // Check previously notified sessions — if resolved, append status to original message
   for (const [sessionId, notif] of [...scanner.notified.entries()]) {
     // Skip sessions we just notified this tick
-    if (!seenSessionIds.has(sessionId)) {
-      // Session file no longer recent — dismiss silently
-      silentCatch("scanner", "deleteStaleNotification", deleteMessage(telegram, chatId, notif.msgId));
-      scanner.notified.delete(sessionId);
-      continue;
-    }
-
     // Skip currently selected session (takeover already handles this)
     if (sessionId === activeSessionId) {
       scanner.notified.delete(sessionId);
       continue;
     }
 
-    // Re-scan to check if still pending
-    const file = recentFiles.find(f => f.sessionId === sessionId);
-    if (!file) {
+    // Determine file path: prefer live recentFiles entry, fall back to stored path
+    const liveFile = recentFiles.find(f => f.sessionId === sessionId);
+    const filePath = liveFile?.filePath ?? notif.filePath;
+
+    // If file no longer exists, clean up
+    if (!fs.existsSync(filePath)) {
+      silentCatch("scanner", "deleteGoneNotification", deleteMessage(telegram, chatId, notif.msgId));
       scanner.notified.delete(sessionId);
       continue;
     }
-    const scan = scanSessionTail(file.filePath);
-    if (scan.pendingTools.length === 0) {
+
+    // Check if the specific pending tool_uses now have tool_results
+    if (notif.pendingToolUseIds.length > 0 &&
+        areToolUsesResolved(filePath, notif.pendingToolUseIds)) {
       const resolvedText = `${notif.text}\n\n✓ Resolved in Claude Code on host`;
       silentCatch("scanner", "editResolved",
         editMessageText(telegram, chatId, notif.msgId, resolvedText, { parseMode: "HTML" }));
