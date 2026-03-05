@@ -218,7 +218,7 @@ export function sessionsReplyKeyboard(sessionsFile?: string): Record<string, unk
   let syncLabel = "/sync";
   if (sessionsFile) {
     const val = readKvFile(sessionsFile).REMOTECODE_AUTO_SYNC;
-    syncLabel = val === "off" ? "/sync (off)" : "/sync (on)";
+    syncLabel = val === "off" ? "/sync (on)" : "/sync (off)";
   }
   return {
     keyboard: [[{ text: syncLabel }, { text: "/sessions" }, { text: "/projects" }]],

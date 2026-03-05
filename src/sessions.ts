@@ -66,13 +66,15 @@ export function decodeProjectPath(encodedDir: string): string {
 function resolvePathSegments(base: string, segments: string[]): string {
   if (segments.length === 0) return base;
 
-  // Try greedily joining segments with _ and check filesystem
+  // Try greedily joining segments with _ or - and check filesystem
   for (let take = segments.length; take >= 1; take--) {
-    const candidate = segments.slice(0, take).join("_");
-    const full = path.join(base, candidate);
-    if (fs.existsSync(full)) {
-      if (take === segments.length) return full;
-      return resolvePathSegments(full, segments.slice(take));
+    for (const sep of ["_", "-"]) {
+      const candidate = segments.slice(0, take).join(sep);
+      const full = path.join(base, candidate);
+      if (fs.existsSync(full)) {
+        if (take === segments.length) return full;
+        return resolvePathSegments(full, segments.slice(take));
+      }
     }
   }
 
