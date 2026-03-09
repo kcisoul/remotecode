@@ -663,10 +663,14 @@ async function handleVoiceMessage(msg: Message, ctx: HandlerContext): Promise<vo
 }
 
 // ---------- path validation ----------
-/** Validate and sanitize a relative path input (no ".." or absolute paths). Returns null if invalid. */
 function sanitizeRelativePath(input: string): string | null {
-  if (!input || input.includes("..") || path.isAbsolute(input)) return null;
-  const sanitized = input.replace(/\\/g, "/").replace(/\/+/g, "/").replace(/^\/|\/$/g, "");
+  if (!input || input.includes("..")) return null;
+  
+  const withoutHomePrefix = input.replace(/^~\/?/, "");
+  
+  if (path.isAbsolute(withoutHomePrefix)) return null;
+  
+  const sanitized = withoutHomePrefix.replace(/\\/g, "/").replace(/\/+/g, "/").replace(/^\/|\/$/g, "");
   return sanitized || null;
 }
 
