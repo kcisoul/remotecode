@@ -8,6 +8,7 @@ import { runSetupIfNeeded } from "./setup";
 import { cmdSetupStt } from "./stt";
 import { daemonMain, isDaemonRunning, isPrivileged, spawnDaemon } from "./daemon";
 import { cmdStart, cmdStop, cmdRestart, cmdStatus, cmdLogs, cmdConfig, cmdUpdate } from "./cli";
+import { cmdEnable, cmdDisable } from "./autostart";
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
@@ -40,6 +41,14 @@ async function main(): Promise<void> {
 
     case "status":
       cmdStatus();
+      break;
+
+    case "enable":
+      await cmdEnable();
+      break;
+
+    case "disable":
+      await cmdDisable();
       break;
 
     case "logs": {
@@ -116,7 +125,7 @@ async function main(): Promise<void> {
 
     default:
       console.error(`Unknown command: ${command}`);
-      console.log("Usage: remotecode [start|stop|restart|status|logs|config|update|setup-stt]");
+      console.log("Usage: remotecode [start|stop|restart|status|logs|config|update|enable|disable|setup-stt]");
       process.exit(1);
   }
 }

@@ -142,6 +142,8 @@ export function cmdStatus(): void {
       "  --tag TAG        Filter by component tag",
       "config             Edit configuration",
     "update             Update to latest version",
+    "enable             Enable auto-start on login",
+    "disable            Disable auto-start on login",
       ...(isMacOS() ? ["setup-stt          Setup STT (speech-to-text)"] : []),
     ]);
     return;
@@ -194,6 +196,8 @@ export function cmdStatus(): void {
     "  --tag TAG        Filter by component tag",
     "config             Edit configuration",
     "update             Update to latest version",
+    "enable             Enable auto-start on login",
+    "disable            Disable auto-start on login",
     ...(isMacOS() ? ["setup-stt          Setup STT (speech-to-text)"] : []),
   ]);
 }
