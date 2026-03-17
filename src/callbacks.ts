@@ -8,7 +8,7 @@ import {
 } from "./telegram";
 import { logger, errorMessage, silentCatch } from "./logger";
 import { escapeHtml } from "./format";
-import { defaultCwd } from "./config";
+import { defaultCwd, getModelLabel } from "./config";
 import { HandlerContext, isUserAllowed } from "./context";
 import { setSessionAutoAllow, setSessionToolAllow, resetSessionAutoAllow, isSessionBusy, suppressSessionMessages, unsuppressSessionMessages } from "./session-state";
 import {
@@ -402,7 +402,7 @@ async function handleModelCallback(
 ): Promise<void> {
   const model = data.slice("model:".length);
   saveModel(ctx.sessionsFile, model);
-  silentCatch("callback", "editModelResponse", editMessageText(ctx.telegram, chatId, messageId, `Model: ${model}`));
+  silentCatch("callback", "editModelResponse", editMessageText(ctx.telegram, chatId, messageId, `Model: ${getModelLabel(model)}`));
 }
 
 // ---------- takeover callback ----------

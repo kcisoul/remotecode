@@ -36,6 +36,7 @@ export interface QueryOptions {
   cwd: string;
   yolo: boolean;
   model?: string;
+  systemPrompt?: string;
   canUseTool?: CanUseToolFn;
 }
 
@@ -107,6 +108,7 @@ interface SessionState {
   releaseTurn: (() => void) | null;
   interrupted: boolean;
   stale: boolean;
+  lastModel?: string;
   lastFileSize: number;
 }
 
@@ -193,6 +195,7 @@ function initNewSession(
       ...(resume ? { resume: sessionId } : { sessionId }),
       cwd: options.cwd,
       model: options.model,
+      systemPrompt: options.systemPrompt,
       permissionMode: options.yolo ? "bypassPermissions" : undefined,
       allowDangerouslySkipPermissions: options.yolo || undefined,
       canUseTool: wrappedCanUseTool,
@@ -211,6 +214,7 @@ function initNewSession(
     releaseTurn: null,
     interrupted: false,
     stale: false,
+    lastModel: options.model,
     lastFileSize: 0,
   };
 
@@ -230,11 +234,19 @@ export async function* querySession(
 
   // Stale session: external changes detected, recreate to pick up new JSONL context
   if (session && !session.stale) {
-    // Check if JSONL file grew since last turn (host CLI wrote new messages)
-    const currentSize = getJsonlFileSize(sessionId);
-    if (currentSize > 0 && session.lastFileSize > 0 && currentSize !== session.lastFileSize) {
-      logger.debug("claude", `JSONL size changed for ${sessionId.slice(0, 8)} (${session.lastFileSize} → ${currentSize}), marking stale`);
+    // Check if model changed (requires fresh initialization for systemPrompt)
+    if (options.model && session.lastModel && options.model !== session.lastModel) {
+      logger.debug("claude", `model changed for ${sessionId.slice(0, 8)} (${session.lastModel} → ${options.model}), marking stale`);
       session.stale = true;
+    }
+
+    // Check if JSONL file grew since last turn (host CLI wrote new messages)
+    if (!session.stale) {
+      const currentSize = getJsonlFileSize(sessionId);
+      if (currentSize > 0 && session.lastFileSize > 0 && currentSize !== session.lastFileSize) {
+        logger.debug("claude", `JSONL size changed for ${sessionId.slice(0, 8)} (${session.lastFileSize} → ${currentSize}), marking stale`);
+        session.stale = true;
+      }
     }
   }
   if (session?.stale) {
@@ -257,7 +269,12 @@ export async function* querySession(
 
     // Update model if needed
     if (options.model) {
-      try { await session.q.setModel(options.model); } catch (err) { logger.debug("claude", `setModel: ${errorMessage(err)}`); }
+      try {
+        await session.q.setModel(options.model);
+        session.lastModel = options.model;
+      } catch (err) {
+        logger.debug("claude", `setModel: ${errorMessage(err)}`);
+      }
     }
 
     // Feed new message via channel

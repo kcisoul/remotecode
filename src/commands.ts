@@ -1,6 +1,6 @@
 import { sendMessage } from "./telegram";
 import { logger } from "./logger";
-import { MODEL_CHOICES } from "./config";
+import { MODEL_CHOICES, getModelLabel } from "./config";
 import { isAutoSyncEnabled, setAutoSync } from "./watcher";
 import {
   loadActiveSessionId,
@@ -160,13 +160,13 @@ export async function handleCommand(
     const arg = text.split(/\s+/).slice(1).join(" ").trim();
     if (arg) {
       saveModel(ctx.sessionsFile, arg);
-      await sendMessage(ctx.telegram, chatId, `Model: ${arg}`, { replyToMessageId: messageId });
+      await sendMessage(ctx.telegram, chatId, `Model: ${getModelLabel(arg)}`, { replyToMessageId: messageId });
     } else {
       const current = loadModel(ctx.sessionsFile);
       const buttons = MODEL_CHOICES.map(({ label, modelId }) => [
         { text: label, callback_data: `model:${modelId}` },
       ]);
-      const label = current ? `Current model: ${current}` : "Select model:";
+      const label = current ? `Current model: ${getModelLabel(current)}` : "Select model:";
       await sendMessage(ctx.telegram, chatId, label, {
         replyToMessageId: messageId,
         replyMarkup: { inline_keyboard: buttons },
