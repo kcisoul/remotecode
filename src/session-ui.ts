@@ -26,8 +26,8 @@ export function formatSessionLabel(session: SessionInfo): string {
 
 // ---------- history rendering ----------
 function safePage(body: string, maxLen: number): string {
-  const open = "<blockquote>";
-  const close = "</blockquote>";
+  const open = "<i>";
+  const close = "</i>";
   const full = open + body + close;
   if (full.length <= maxLen) return full;
   const trimTo = maxLen - open.length - close.length - 15;
@@ -83,21 +83,21 @@ export function readLastTurns(sessionId: string, maxTurns: number = 4): string[]
     const label = t.role === "user" ? "You" : "Bot";
     const trimmed = t.text.length > turnLimit ? t.text.slice(0, turnLimit) + "\n...[truncated]" : t.text;
     let html = mdToTelegramHtml(trimmed);
-    // Strip tags that cannot nest inside <blockquote>
+    // Strip tags that cannot nest inside <i>
     html = html.replace(/<\/?(?:blockquote|pre)>/g, "");
     formatted.push(`<b><code>${label}:</code></b>\n${html}`);
   }
 
   const messages: string[] = [];
   let current: string[] = [];
-  let currentLen = "<blockquote></blockquote>".length;
+  let currentLen = "<i></i>".length;
 
   for (const entry of formatted) {
     const entryLen = entry.length + (current.length > 0 ? separator.length : 0);
     if (current.length > 0 && currentLen + entryLen > maxLen) {
       messages.push(safePage(current.join(separator), maxLen));
       current = [];
-      currentLen = "<blockquote></blockquote>".length;
+      currentLen = "<i></i>".length;
     }
     current.push(entry);
     currentLen += entry.length + (current.length > 1 ? separator.length : 0);
@@ -163,25 +163,21 @@ function buildSessionBlock(
 
   const lines = [header];
   if (trimmed) lines.push(`${I}${escapeHtml(trimmed)}`);
-  lines.push(`${I}<code>${timeAgo}</code>`);
+  lines.push(`${I}${timeAgo}`);
 
   const info = lines.join("\n");
 
-  if (isActive) return info + "\n" + `<blockquote>current session</blockquote>`;
+  if (isActive) return info + "\n" + `${I}<i>current session</i>`;
 
-  return info + "\n" + `<blockquote>/switch_to_${prefix}</blockquote>`;
+  return info + "\n" + `${I}/switch_to_${prefix}`;
 }
 
 export function buildSessionDisplay(
   sessions: SessionInfo[],
   activeId: string | null,
 ): { text: string; buttons: Array<Array<InlineButton>> } {
-  const buttons: Array<Array<InlineButton>> = [
-    [{ text: "+ New session", callback_data: "sess:new" }],
-  ];
-
   if (sessions.length === 0) {
-    return { text: "No sessions found.", buttons };
+    return { text: "No sessions found.", buttons: [[{ text: "+ New session", callback_data: "sess:new" }]] };
   }
 
   const blocks: string[] = [];
@@ -189,7 +185,7 @@ export function buildSessionDisplay(
     blocks.push(buildSessionBlock(sessions[i], i + 1, sessions[i].sessionId === activeId));
   }
 
-  return { text: blocks.join("\n\n"), buttons };
+  return { text: blocks.join("\n\n"), buttons: [[{ text: "+ New session", callback_data: "sess:new" }]] };
 }
 
 export function buildProjectSessionDisplay(
@@ -198,12 +194,8 @@ export function buildProjectSessionDisplay(
   projectName: string,
   encodedDir: string,
 ): { text: string; buttons: Array<Array<InlineButton>> } {
-  const buttons: Array<Array<InlineButton>> = [
-    [{ text: "+ New session", callback_data: `proj:new:${encodedDir}` }],
-  ];
-
   if (sessions.length === 0) {
-    return { text: `${escapeHtml(projectName)}: no sessions.`, buttons };
+    return { text: `${escapeHtml(projectName)}: no sessions.`, buttons: [[{ text: "+ New session", callback_data: `proj:new:${encodedDir}` }]] };
   }
 
   const blocks: string[] = [];
@@ -211,7 +203,7 @@ export function buildProjectSessionDisplay(
     blocks.push(buildSessionBlock(sessions[i], i + 1, sessions[i].sessionId === activeId));
   }
 
-  return { text: blocks.join("\n\n"), buttons };
+  return { text: blocks.join("\n\n"), buttons: [[{ text: "+ New session", callback_data: `proj:new:${encodedDir}` }]] };
 }
 
 export function sessionsReplyKeyboard(sessionsFile?: string): Record<string, unknown> {

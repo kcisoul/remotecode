@@ -16,7 +16,7 @@ import {
 import { querySession, closeSession, wasSessionInterrupted, markSessionStale, type CanUseToolFn, type MessageContent } from "./claude";
 import { mdToTelegramHtml, escapeHtml, tryMdToHtml, truncateMessage, stripThinking, formatToolDescription } from "./format";
 import { logger, errorMessage, silentCatch, silentTry } from "./logger";
-import { defaultCwd, whisperModelPath, SILENT_TOOLS, discoverSkills } from "./config";
+import { defaultCwd, whisperModelPath, SILENT_TOOLS, discoverSkills, getModelLabel } from "./config";
 import {
   getOrCreateSessionId,
   loadSessionCwd,
@@ -154,7 +154,7 @@ async function handleTakeover(
 
   // Send feedback notification
   const promptPreview = escapeHtml(lastPrompt.length > 300 ? lastPrompt.slice(0, 300) + "…" : lastPrompt);
-  const feedbackText = `Syncing session context.\nRe-sending last message to Claude.\n\n<blockquote>${promptPreview}</blockquote>\n\nWaiting for response...`;
+  const feedbackText = `Syncing session context.\nRe-sending last message to Claude.\n\n<i>${promptPreview}</i>\n\nWaiting for response...`;
   let replyId = messageId;
   try {
     replyId = await sendMessage(ctx.telegram, chatId, feedbackText, {
@@ -813,7 +813,7 @@ async function streamResponse(
   chatId: number,
   messageId: number,
   ctx: HandlerContext,
-  options: { cwd: string; model?: string; typingHandle?: TypingHandle; quiet?: boolean },
+  options: { cwd: string; model?: string; systemPrompt?: any; typingHandle?: TypingHandle; quiet?: boolean },
 ): Promise<StreamResult> {
   const textParts: string[] = [];
   let gotResult = false;
@@ -845,6 +845,7 @@ async function streamResponse(
     cwd: options.cwd,
     yolo: isYolo,
     model: options.model,
+    systemPrompt: options.systemPrompt,
     canUseTool: buildCanUseTool(ctx, chatId, messageId, sessionId, options.cwd, flushRef, toolCtrl.toRef()),
   })) {
     const suppressed = isSessionSuppressed(sessionId) || quiet;
@@ -918,7 +919,7 @@ async function sendFinalResponse(
   if (voiceMode) {
     const userHtml = mdToTelegramHtml(prompt);
     const botHtml = mdToTelegramHtml(truncateMessage(fullText, 3200));
-    const formatted = `<blockquote><b><code>You:</code></b>\n${userHtml}\n\n<b><code>Bot:</code></b>\n${botHtml}</blockquote>`;
+    const formatted = `<i><b><code>You:</code></b>\n${userHtml}\n\n<b><code>Bot:</code></b>\n${botHtml}</i>`;
     await sendMessage(ctx.telegram, chatId, formatted, {
       replyToMessageId: messageId,
       replyMarkup: sessionsReplyKeyboard(ctx.sessionsFile),
@@ -946,6 +947,12 @@ async function executePrompt(
 ): Promise<void> {
   const cwd = loadSessionCwd(ctx.sessionsFile) || defaultCwd();
   const model = loadModel(ctx.sessionsFile);
+  logger.info("handler", `executePrompt: model=${model || "default"} sessionId=${sessionId.slice(0, 8)}`);
+  const systemPrompt = model ? {
+    type: "preset" as const,
+    preset: "claude_code" as const,
+    append: `\n\nCRITICAL: You are currently running as ${getModelLabel(model)} (Model ID: ${model}). If asked about your model, version, or identity, you MUST identify yourself as ${getModelLabel(model)}. Do not refer to yourself as Opus if you are Sonnet or Haiku.`,
+  } : undefined;
 
   // Cancel any pending cleanup timeout — we're starting a new query for this session
   clearCleanupTimeout(sessionId);
@@ -957,7 +964,7 @@ async function executePrompt(
 
   try {
     const { textParts, gotResult } = await streamResponse(
-      sessionId, prompt, chatId, messageId, ctx, { cwd, model, typingHandle, quiet },
+      sessionId, prompt, chatId, messageId, ctx, { cwd, model, systemPrompt, typingHandle, quiet },
     );
 
     if (!gotResult) return;

@@ -204,7 +204,14 @@ export function discoverSkills(): SkillInfo[] {
 
 /** Model choices shown in the /model inline keyboard. */
 export const MODEL_CHOICES: Array<{ label: string; modelId: string }> = [
-  { label: "Sonnet 4.5", modelId: "claude-sonnet-4-5-20250929" },
-  { label: "Opus 4.6", modelId: "claude-opus-4-6" },
-  { label: "Haiku 4.5", modelId: "claude-haiku-4-5-20251001" },
+  { label: "Opus", modelId: "opus" },
+  { label: "Sonnet", modelId: "sonnet" },
+  { label: "Haiku", modelId: "haiku" },
 ];
+
+/** Returns the display label for a model ID, or the ID itself if not found. */
+export function getModelLabel(modelId: string | undefined): string {
+  if (!modelId) return "Default";
+  const choice = MODEL_CHOICES.find((m) => m.modelId === modelId);
+  return choice ? choice.label : modelId;
+}

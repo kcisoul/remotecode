@@ -8,7 +8,7 @@ import {
 } from "./telegram";
 import { logger, errorMessage, silentCatch } from "./logger";
 import { escapeHtml } from "./format";
-import { defaultCwd } from "./config";
+import { defaultCwd, getModelLabel } from "./config";
 import { HandlerContext, isUserAllowed } from "./context";
 import { setSessionAutoAllow, setSessionToolAllow, resetSessionAutoAllow, isSessionBusy, suppressSessionMessages, unsuppressSessionMessages } from "./session-state";
 import {
@@ -251,13 +251,12 @@ export function stopOldSession(sessionsFile: string, newSessionId?: string): voi
 // ---------- project list display ----------
 const I = "\u00a0\u00a0\u00a0";
 export function buildProjectListDisplay(): { text: string; buttons: Array<Array<{ text: string; callback_data: string }>> } {
-  const buttons: Array<Array<{ text: string; callback_data: string }>> = [
-    [{ text: "+ New Project", callback_data: "proj:add" }],
-  ];
+  const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
 
   const projects = discoverProjects();
 
   if (projects.length === 0) {
+    buttons.push([{ text: "+ New Project", callback_data: "proj:add" }]);
     return { text: "No projects found.", buttons };
   }
 
@@ -266,13 +265,22 @@ export function buildProjectListDisplay(): { text: string; buttons: Array<Array<
     const p = projects[i];
     const name = escapeHtml(p.projectName);
     const timeAgo = formatTimeAgo(p.lastModified);
-    const count = p.sessionCount > 5 ? "5+" : String(p.sessionCount);
+    const count = p.sessionCount;
+    const countLabel = count === 1 ? "1 session" : `${count} sessions`;
     const safeName = p.projectName.replace(/[^a-zA-Z0-9_]/g, "_");
+    
+    // Truncate last message for display
+    let lastMsg = "";
+    if (p.lastMessage) {
+      const truncated = p.lastMessage.length > 50 ? p.lastMessage.slice(0, 47) + "..." : p.lastMessage;
+      lastMsg = `\n${I}<i>${escapeHtml(truncated)}</i>`;
+    }
 
-    const info = `\u2022 <b>${name}</b>\n${I}${count} sessions  \u00b7  <code>${timeAgo}</code>`;
-    const cmd = `<blockquote>/show_sessions_${safeName}</blockquote>`;
-    blocks.push(info + "\n" + cmd);
+    const info = `\u2022 <b>${name}</b>\n${I}${countLabel}  \u00b7  ${timeAgo}${lastMsg}\n${I}/show_sessions_${safeName}`;
+    blocks.push(info);
   }
+
+  buttons.push([{ text: "+ New Project", callback_data: "proj:add" }]);
 
   return { text: blocks.join("\n\n"), buttons };
 }
@@ -346,7 +354,7 @@ async function handleAskCallback(
     const meta = pending?.meta;
     if (meta) {
       const quoted = `${meta.question}\n${meta.options.map(o => `- ${o}`).join("\n")}`;
-      displayText = `<blockquote>${escapeHtml(quoted)}</blockquote>\nAnswer skipped`;
+      displayText = `<i>${escapeHtml(quoted)}</i>\nAnswer skipped`;
     } else {
       displayText = "Answer skipped";
     }
@@ -402,7 +410,7 @@ async function handleModelCallback(
 ): Promise<void> {
   const model = data.slice("model:".length);
   saveModel(ctx.sessionsFile, model);
-  silentCatch("callback", "editModelResponse", editMessageText(ctx.telegram, chatId, messageId, `Model: ${model}`));
+  silentCatch("callback", "editModelResponse", editMessageText(ctx.telegram, chatId, messageId, `Model: ${getModelLabel(model)}`));
 }
 
 // ---------- takeover callback ----------
