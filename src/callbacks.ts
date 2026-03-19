@@ -251,13 +251,12 @@ export function stopOldSession(sessionsFile: string, newSessionId?: string): voi
 // ---------- project list display ----------
 const I = "\u00a0\u00a0\u00a0";
 export function buildProjectListDisplay(): { text: string; buttons: Array<Array<{ text: string; callback_data: string }>> } {
-  const buttons: Array<Array<{ text: string; callback_data: string }>> = [
-    [{ text: "+ New Project", callback_data: "proj:add" }],
-  ];
+  const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
 
   const projects = discoverProjects();
 
   if (projects.length === 0) {
+    buttons.push([{ text: "+ New Project", callback_data: "proj:add" }]);
     return { text: "No projects found.", buttons };
   }
 
@@ -267,12 +266,15 @@ export function buildProjectListDisplay(): { text: string; buttons: Array<Array<
     const name = escapeHtml(p.projectName);
     const timeAgo = formatTimeAgo(p.lastModified);
     const count = p.sessionCount > 5 ? "5+" : String(p.sessionCount);
-    const safeName = p.projectName.replace(/[^a-zA-Z0-9_]/g, "_");
 
     const info = `\u2022 <b>${name}</b>\n${I}${count} sessions  \u00b7  <code>${timeAgo}</code>`;
-    const cmd = `<blockquote>/show_sessions_${safeName}</blockquote>`;
-    blocks.push(info + "\n" + cmd);
+    blocks.push(info);
+    
+    // Add button for each project
+    buttons.push([{ text: `\ud83d\udcc1 ${p.projectName}`, callback_data: `proj:${p.encodedDir}` }]);
   }
+
+  buttons.push([{ text: "+ New Project", callback_data: "proj:add" }]);
 
   return { text: blocks.join("\n\n"), buttons };
 }
@@ -346,7 +348,7 @@ async function handleAskCallback(
     const meta = pending?.meta;
     if (meta) {
       const quoted = `${meta.question}\n${meta.options.map(o => `- ${o}`).join("\n")}`;
-      displayText = `<blockquote>${escapeHtml(quoted)}</blockquote>\nAnswer skipped`;
+      displayText = `<i>${escapeHtml(quoted)}</i>\nAnswer skipped`;
     } else {
       displayText = "Answer skipped";
     }

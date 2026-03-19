@@ -154,7 +154,7 @@ async function handleTakeover(
 
   // Send feedback notification
   const promptPreview = escapeHtml(lastPrompt.length > 300 ? lastPrompt.slice(0, 300) + "…" : lastPrompt);
-  const feedbackText = `Syncing session context.\nRe-sending last message to Claude.\n\n<blockquote>${promptPreview}</blockquote>\n\nWaiting for response...`;
+  const feedbackText = `Syncing session context.\nRe-sending last message to Claude.\n\n<i>${promptPreview}</i>\n\nWaiting for response...`;
   let replyId = messageId;
   try {
     replyId = await sendMessage(ctx.telegram, chatId, feedbackText, {
@@ -919,7 +919,7 @@ async function sendFinalResponse(
   if (voiceMode) {
     const userHtml = mdToTelegramHtml(prompt);
     const botHtml = mdToTelegramHtml(truncateMessage(fullText, 3200));
-    const formatted = `<blockquote><b><code>You:</code></b>\n${userHtml}\n\n<b><code>Bot:</code></b>\n${botHtml}</blockquote>`;
+    const formatted = `<i><b><code>You:</code></b>\n${userHtml}\n\n<b><code>Bot:</code></b>\n${botHtml}</i>`;
     await sendMessage(ctx.telegram, chatId, formatted, {
       replyToMessageId: messageId,
       replyMarkup: sessionsReplyKeyboard(ctx.sessionsFile),

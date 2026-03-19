@@ -178,7 +178,7 @@ function processNewData(telegram: TelegramConfig, chatId: number): void {
     const label = type === "user" ? "[sync] You:" : "[sync] Bot:";
     const truncated = truncateMessage(cleaned, 3200);
     const formatted = tryMdToHtml(truncated);
-    const body = `<blockquote>${label}</blockquote>\n\n${formatted.text}`;
+    const body = `<i>${label}</i>\n\n${formatted.text}`;
     sendMessage(telegram, chatId, body, {
       parseMode: "HTML",
     }).catch((err) => {
@@ -610,9 +610,9 @@ function runScannerTick(): void {
     const desc = formatToolDescription(first.toolName, first.input);
     const countLabel = scan.pendingTools.length > 1 ? `\n+${scan.pendingTools.length - 1} more pending tool(s)` : "";
     const inputLine = scan.lastUserInput
-      ? `\n<b>You:</b>\n<blockquote>${escapeHtml(scan.lastUserInput.length > 200 ? scan.lastUserInput.slice(0, 200) + "…" : scan.lastUserInput)}</blockquote>\n`
+      ? `\n<b>You:</b>\n<i>${escapeHtml(scan.lastUserInput.length > 200 ? scan.lastUserInput.slice(0, 200) + "…" : scan.lastUserInput)}</i>\n`
       : "\n";
-    const text = `<blockquote>Notification</blockquote>\nPermission pending in another session\nProject: <b>${escapeHtml(displayPath)}</b>\n${inputLine}\n<b>Pending:</b>\n${desc}${countLabel}`;
+    const text = `<i>Notification</i>\nPermission pending in another session\nProject: <b>${escapeHtml(displayPath)}</b>\n${inputLine}\n<b>Pending:</b>\n${desc}${countLabel}`;
     const buttons = [
       [{ text: "📱 Continue in Telegram", callback_data: `takeover:${file.sessionId}` }],
     ];
