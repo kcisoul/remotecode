@@ -265,13 +265,19 @@ export function buildProjectListDisplay(): { text: string; buttons: Array<Array<
     const p = projects[i];
     const name = escapeHtml(p.projectName);
     const timeAgo = formatTimeAgo(p.lastModified);
-    const count = p.sessionCount > 5 ? "5+" : String(p.sessionCount);
-
-    const info = `\u2022 <b>${name}</b>\n${I}${count} sessions  \u00b7  <code>${timeAgo}</code>`;
-    blocks.push(info);
+    const count = p.sessionCount;
+    const countLabel = count === 1 ? "1 session" : `${count} sessions`;
+    const safeName = p.projectName.replace(/[^a-zA-Z0-9_]/g, "_");
     
-    // Add button for each project
-    buttons.push([{ text: `\ud83d\udcc1 ${p.projectName}`, callback_data: `proj:${p.encodedDir}` }]);
+    // Truncate last message for display
+    let lastMsg = "";
+    if (p.lastMessage) {
+      const truncated = p.lastMessage.length > 50 ? p.lastMessage.slice(0, 47) + "..." : p.lastMessage;
+      lastMsg = `\n${I}<i>${escapeHtml(truncated)}</i>`;
+    }
+
+    const info = `\u2022 <b>${name}</b>\n${I}${countLabel}  \u00b7  ${timeAgo}${lastMsg}\n${I}/show_sessions_${safeName}`;
+    blocks.push(info);
   }
 
   buttons.push([{ text: "+ New Project", callback_data: "proj:add" }]);

@@ -18,6 +18,20 @@ async function main(): Promise<void> {
     return;
   }
 
+  // Foreground mode for development (skip daemon spawning)
+  if (args.includes("--fg") || args.includes("--foreground")) {
+    ensureConfigDir();
+    loadConfig();
+    const config = getConfig();
+    if (config.yolo && isPrivileged()) {
+      console.error("\x1b[31mError: YOLO mode cannot run with root/sudo privileges.\x1b[0m");
+      process.exit(1);
+    }
+    printBanner(["Mode: foreground (dev)"]);
+    await daemonMain();
+    return;
+  }
+
   // Verbose flag
   if (args.includes("-v") || args.includes("--verbose")) {
     process.env.REMOTECODE_VERBOSE = "1";

@@ -163,13 +163,13 @@ function buildSessionBlock(
 
   const lines = [header];
   if (trimmed) lines.push(`${I}${escapeHtml(trimmed)}`);
-  lines.push(`${I}<code>${timeAgo}</code>`);
+  lines.push(`${I}${timeAgo}`);
 
   const info = lines.join("\n");
 
-  if (isActive) return info + "\n" + `<i>current session</i>`;
+  if (isActive) return info + "\n" + `${I}<i>current session</i>`;
 
-  return info + "\n" + `<code>/switch_to_${prefix}</code>`;
+  return info + "\n" + `${I}/switch_to_${prefix}`;
 }
 
 export function buildSessionDisplay(
@@ -185,10 +185,7 @@ export function buildSessionDisplay(
     blocks.push(buildSessionBlock(sessions[i], i + 1, sessions[i].sessionId === activeId));
   }
 
-  const buttons = buildSessionGrid(sessions, activeId);
-  buttons.push([{ text: "+ New session", callback_data: "sess:new" }]);
-
-  return { text: blocks.join("\n\n"), buttons };
+  return { text: blocks.join("\n\n"), buttons: [[{ text: "+ New session", callback_data: "sess:new" }]] };
 }
 
 export function buildProjectSessionDisplay(
@@ -206,10 +203,7 @@ export function buildProjectSessionDisplay(
     blocks.push(buildSessionBlock(sessions[i], i + 1, sessions[i].sessionId === activeId));
   }
 
-  const buttons = buildSessionGrid(sessions, activeId, { showDir: false });
-  buttons.push([{ text: "+ New session", callback_data: `proj:new:${encodedDir}` }]);
-
-  return { text: blocks.join("\n\n"), buttons };
+  return { text: blocks.join("\n\n"), buttons: [[{ text: "+ New session", callback_data: `proj:new:${encodedDir}` }]] };
 }
 
 export function sessionsReplyKeyboard(sessionsFile?: string): Record<string, unknown> {

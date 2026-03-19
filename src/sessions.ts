@@ -37,6 +37,7 @@ export interface ProjectInfo {
   projectName: string;
   sessionCount: number;
   lastModified: number;
+  lastMessage: string | null;
 }
 
 // ---------- project path helpers ----------
@@ -300,11 +301,13 @@ export function discoverProjects(): ProjectInfo[] {
       if (dir === "memory") continue;
       const sessions = discoverProjectSessions(dir, 50);
       if (sessions.length === 0) continue;
+      const lastSession = sessions[0]; // Most recent session
       results.push({
         encodedDir: dir,
         projectName: projectDisplayName(dir),
         sessionCount: sessions.length,
-        lastModified: sessions[0].lastModified,
+        lastModified: lastSession.lastModified,
+        lastMessage: lastSession.lastMessage || lastSession.firstMessage,
       });
     }
   } catch { return []; }

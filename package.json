@@ -19,7 +19,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts",
-    "dev:watch": "ts-node-dev --respawn --transpile-only src/index.ts",
+    "dev:watch": "ts-node-dev --respawn --transpile-only src/index.ts --fg",
     "dev:cycle": "npm run build && npm link && pkill -f 'node.*remotecode' 2>/dev/null; npm start",
     "prepublishOnly": "npm run build",
     "test": "vitest run",
